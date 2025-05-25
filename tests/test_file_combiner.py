@@ -761,6 +761,19 @@ exclude_patterns = ["*.test", "temp/*"]
         # Temp files list should be empty
         assert len(combiner._temp_files) == 0
 
+    def test_is_github_url(self, combiner):
+        """Test GitHub URL detection"""
+        # Valid GitHub URLs
+        assert combiner._is_github_url("https://github.com/user/repo")
+        assert combiner._is_github_url("https://www.github.com/user/repo")
+        assert combiner._is_github_url("http://github.com/user/repo")
+
+        # Invalid URLs
+        assert not combiner._is_github_url("https://gitlab.com/user/repo")
+        assert not combiner._is_github_url("/local/path")
+        assert not combiner._is_github_url("not-a-url")
+        assert not combiner._is_github_url("")
+
 
 class TestEdgeCases:
     """Test edge cases and error conditions"""

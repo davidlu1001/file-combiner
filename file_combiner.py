@@ -16,10 +16,12 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import time
 import tempfile
 import traceback
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -168,6 +170,50 @@ class FileCombiner:
             logger.addHandler(handler)
 
         return logger
+
+    def _is_github_url(self, url_or_path: str) -> bool:
+        """Check if the input is a GitHub URL"""
+        try:
+            parsed = urllib.parse.urlparse(url_or_path)
+            return parsed.netloc.lower() in ["github.com", "www.github.com"]
+        except Exception:
+            return False
+
+    def _clone_github_repo(self, github_url: str) -> Optional[Path]:
+        """Clone a GitHub repository to a temporary directory"""
+        try:
+            # Create a temporary directory
+            temp_dir = Path(tempfile.mkdtemp(prefix="file_combiner_github_"))
+            self._temp_files.append(temp_dir)
+
+            self.logger.info(f"Cloning GitHub repository: {github_url}")
+
+            # Clone the repository
+            result = subprocess.run(
+                ["git", "clone", "--depth", "1", github_url, str(temp_dir)],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode != 0:
+                self.logger.error(f"Failed to clone repository: {result.stderr}")
+                return None
+
+            self.logger.info(f"Successfully cloned to: {temp_dir}")
+            return temp_dir
+
+        except subprocess.TimeoutExpired:
+            self.logger.error("Git clone operation timed out")
+            return None
+        except FileNotFoundError:
+            self.logger.error(
+                "Git command not found. Please install Git to clone repositories."
+            )
+            return None
+        except Exception as e:
+            self.logger.error(f"Error cloning repository: {e}")
+            return None
 
     def _default_excludes(self) -> List[str]:
         """Default exclusion patterns optimized for development"""
@@ -489,7 +535,16 @@ class FileCombiner:
     ) -> bool:
         """Combine files with comprehensive error handling and validation"""
         try:
-            source_path = Path(source_path).resolve()
+            # Check if source_path is a GitHub URL
+            if isinstance(source_path, str) and self._is_github_url(source_path):
+                cloned_path = self._clone_github_repo(source_path)
+                if cloned_path is None:
+                    self.logger.error("Failed to clone GitHub repository")
+                    return False
+                source_path = cloned_path
+            else:
+                source_path = Path(source_path).resolve()
+
             output_path = Path(output_path).resolve()
 
             # Validation
@@ -1173,13 +1228,17 @@ class FileCombiner:
             raise
 
     def _cleanup_temp_files(self):
-        """Clean up any temporary files"""
-        for temp_file in self._temp_files[:]:
+        """Clean up any temporary files and directories"""
+        for temp_item in self._temp_files[:]:
             try:
-                if os.path.exists(temp_file):
-                    os.unlink(temp_file)
-                self._temp_files.remove(temp_file)
-            except OSError:
+                temp_path = Path(temp_item)
+                if temp_path.exists():
+                    if temp_path.is_dir():
+                        shutil.rmtree(temp_path)
+                    else:
+                        temp_path.unlink()
+                self._temp_files.remove(temp_item)
+            except (OSError, PermissionError):
                 pass
 
     def __del__(self):
@@ -1289,11 +1348,14 @@ Examples:
   %(prog)s combine . combined_files.txt
   %(prog)s split combined_files.txt ./restored
 
+  # GitHub repository support
+  %(prog)s combine https://github.com/user/repo repo.txt
+
   # With compression and verbose output
   %(prog)s combine /path/to/repo combined.txt.gz -cv
 
-  # Advanced filtering
-  %(prog)s combine . output.txt --exclude "*.log" --max-size 10M
+  # Advanced filtering (excludes Python cache folders)
+  %(prog)s combine . output.txt --exclude "*.log" --exclude "__pycache__/**" --max-size 10M
 
   # Dry run to preview
   %(prog)s combine . output.txt --dry-run --verbose
@@ -1303,7 +1365,7 @@ Examples:
     parser.add_argument(
         "operation", choices=["combine", "split"], help="Operation to perform"
     )
-    parser.add_argument("input_path", help="Input directory or file")
+    parser.add_argument("input_path", help="Input directory, file, or GitHub URL")
     parser.add_argument("output_path", help="Output file or directory")
 
     # Basic options

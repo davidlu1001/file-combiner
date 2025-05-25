@@ -43,6 +43,10 @@ pdm install -G dev
 file-combiner combine . my-project.txt \
   --exclude "__pycache__/**" --exclude "__pypackages__/**"
 
+# Combine a GitHub repository directly
+file-combiner combine https://github.com/davidlu1001/file-combiner repo-archive.txt \
+  --exclude "__pycache__/**" --exclude ".git/**"
+
 # Combine with compression
 file-combiner combine /path/to/repo combined.txt.gz --compress \
   --exclude "__pycache__/**" --exclude "*.pyc"
@@ -56,6 +60,27 @@ file-combiner combine . output.txt --dry-run --verbose \
 ```
 
 ## 📖 Advanced Examples
+
+### GitHub Repository Support
+
+```bash
+# Combine any public GitHub repository directly
+file-combiner combine https://github.com/user/repo combined-repo.txt
+
+# With smart exclusions for clean output
+file-combiner combine https://github.com/davidlu1001/file-combiner repo.txt \
+  --exclude "__pycache__/**" --exclude ".git/**" \
+  --exclude "*.pyc" --exclude ".pytest_cache/**" \
+  --exclude "__pypackages__/**" --exclude ".pdm-build/**"
+
+# Compress large repositories
+file-combiner combine https://github.com/user/large-repo repo.txt.gz --compress
+```
+
+**Requirements for GitHub support:**
+- Git must be installed and available in PATH
+- Repository must be publicly accessible (or you must have access)
+- Temporary directory space for cloning
 
 ### AI-Optimized Combining
 
@@ -144,8 +169,10 @@ pdm run pytest --cov=file_combiner
 ## 🎉 Recent Updates (v2.0.1)
 
 ### ✨ New Features
+- ✅ **GitHub URL support** - Clone and combine repositories directly from GitHub URLs
 - ✅ **Rich terminal output** with beautiful colored progress bars and formatting
 - ✅ **PDM dependency management** for modern Python project workflow
+- ✅ **Smart Python exclusions** - Automatically exclude `__pycache__`, `__pypackages__`, etc.
 - ✅ Enhanced UI with spinners, colored checkmarks, and time tracking
 
 ### 🐛 Bug Fixes
@@ -155,7 +182,6 @@ pdm run pytest --cov=file_combiner
 - ✅ Fixed missing `io` module import for error handling
 - ✅ Fixed version mismatch between setup.py and file_combiner.py
 - ✅ Fixed console script entry point for proper CLI execution
-- ✅ Fixed all 6 remaining test issues (100% test pass rate: 31/31)
 
 ### 🚀 Improvements
 - ✅ Improved trailing newline preservation in file restoration
