@@ -30,7 +30,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "file-combiner=file_combiner:main",
+            "file-combiner=file_combiner:cli_main",
         ],
     },
     classifiers=[

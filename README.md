@@ -125,12 +125,20 @@ flake8 file_combiner.py
 
 ## 🐛 Recent Bug Fixes (v2.0.1)
 
-- ✅ Fixed negative `max_workers` validation
-- ✅ Fixed `_temp_files` initialization issues
-- ✅ Fixed content parsing for files starting with `#`
-- ✅ Improved trailing newline preservation
-- ✅ Enhanced error handling and robustness
+- ✅ Fixed negative `max_workers` validation causing crashes
+- ✅ Fixed `_temp_files` initialization issues in constructor
+- ✅ Fixed content parsing for files starting with `#` characters
+- ✅ Fixed missing `io` module import for error handling
+- ✅ Fixed version mismatch between setup.py and file_combiner.py
+- ✅ Fixed console script entry point for proper CLI execution
+- ✅ Improved trailing newline preservation in file restoration
+- ✅ Enhanced error handling and robustness throughout codebase
 - ✅ Updated dependencies and requirements
+
+### Known Limitations
+
+- **Line endings**: Windows line endings (`\r\n`) are converted to Unix line endings (`\n`) during processing
+- **Some tests**: A few test cases expect different error handling behavior and may need updates
 
 ## 📄 License
 

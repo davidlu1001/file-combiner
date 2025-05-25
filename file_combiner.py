@@ -1375,7 +1375,10 @@ Examples:
         return 1
 
 
-if __name__ == "__main__":
-    import io
+def cli_main():
+    """Synchronous entry point for console scripts"""
+    return asyncio.run(main())
 
-    sys.exit(asyncio.run(main()))
+
+if __name__ == "__main__":
+    sys.exit(cli_main())
