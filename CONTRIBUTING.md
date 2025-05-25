@@ -2,7 +2,7 @@ We welcome contributions to the File Combiner project! This document provides gu
 1. Fork the repository on GitHub
 2. Clone your fork locally:
    ```bash
-   git clone https://github.com/yourusername/file-combiner.git
+   git clone https://github.com/davidlu1001/file-combiner.git
    cd file-combiner
    ```
 3. Set up development environment:

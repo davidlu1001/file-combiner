@@ -31,7 +31,7 @@ pip install file-combiner
 pip install file-combiner[full]
 
 # Development installation (using PDM)
-git clone https://github.com/yourusername/file-combiner.git
+git clone https://github.com/davidlu1001/file-combiner.git
 cd file-combiner
 pdm install -G dev
 ```
@@ -39,17 +39,20 @@ pdm install -G dev
 ### Basic Usage
 
 ```bash
-# Combine current directory into a single file
-file-combiner combine . my-project.txt
+# Combine current directory into a single file (excludes Python cache folders)
+file-combiner combine . my-project.txt \
+  --exclude "__pycache__/**" --exclude "__pypackages__/**"
 
 # Combine with compression
-file-combiner combine /path/to/repo combined.txt.gz --compress
+file-combiner combine /path/to/repo combined.txt.gz --compress \
+  --exclude "__pycache__/**" --exclude "*.pyc"
 
 # Split archive back to original structure
 file-combiner split combined.txt.gz ./restored-project
 
 # Dry run to preview what would be combined
-file-combiner combine . output.txt --dry-run --verbose
+file-combiner combine . output.txt --dry-run --verbose \
+  --exclude "__pycache__/**" --exclude "__pypackages__/**"
 ```
 
 ## 📖 Advanced Examples
@@ -57,9 +60,11 @@ file-combiner combine . output.txt --dry-run --verbose
 ### AI-Optimized Combining
 
 ```bash
-# Perfect for sharing with AI agents
+# Perfect for sharing with AI agents (excludes common cache/build folders)
 file-combiner combine . for-ai.txt \
   --exclude "node_modules/**" --exclude ".git/**" \
+  --exclude "__pycache__/**" --exclude "__pypackages__/**" \
+  --exclude "*.pyc" --exclude ".pytest_cache/**" \
   --max-size 5M
 ```
 
@@ -90,8 +95,12 @@ verbose = false
 exclude_patterns = [
     "node_modules/**/*",
     "__pycache__/**/*",
+    "__pypackages__/**/*",
     "*.pyc",
-    ".git/**/*"
+    ".pytest_cache/**/*",
+    ".git/**/*",
+    ".venv/**/*",
+    "venv/**/*"
 ]
 include_patterns = [
     "*.py",

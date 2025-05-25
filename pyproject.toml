@@ -32,9 +32,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/file-combiner"
-Repository = "https://github.com/yourusername/file-combiner"
-"Bug Reports" = "https://github.com/yourusername/file-combiner/issues"
+Homepage = "https://github.com/davidlu1001/file-combiner"
+Repository = "https://github.com/davidlu1001/file-combiner"
+"Bug Reports" = "https://github.com/davidlu1001/file-combiner/issues"
 
 [project.scripts]
 file-combiner = "file_combiner:cli_main"
