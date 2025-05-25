@@ -1,11 +1,15 @@
 """Setup script for file-combiner"""
+
 from setuptools import setup
 from pathlib import Path
+
 readme_path = Path(__file__).parent / "README.md"
-long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+long_description = (
+    readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
+)
 setup(
     name="file-combiner",
-    version="2.0.0",
+    version="2.0.1",
     author="File Combiner Project",
     author_email="info@file-combiner.dev",
     description="High-performance file combiner for large repositories and AI agents",
