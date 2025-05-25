@@ -4,18 +4,20 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 
-A high-performance file combiner that merges entire directories into single files and restores them back to their original structure. Optimized for AI agents (Claude, ChatGPT, Copilot) and perfect for large codebases.
+A high-performance file combiner that merges entire directories into single files and restores them back to their original structure. Features **multi-format output** (TXT, XML, JSON, Markdown, YAML) with intelligent auto-detection. Optimized for AI agents (Claude, ChatGPT, Copilot) and perfect for large codebases.
 
 ## ✨ Features
 
+- 🎨 **Multi-Format Output**: TXT, XML, JSON, Markdown, YAML with auto-detection
 - 🚀 **High Performance**: Parallel processing with async I/O
 - 🔄 **Bidirectional**: Combine ↔ Split operations with perfect fidelity
 - 🗜️ **Smart Compression**: Optional gzip compression
-- 🤖 **AI-Optimized**: Perfect format for AI agents
+- 🤖 **AI-Optimized**: Perfect format for AI agents with syntax highlighting
 - 📁 **Deep Recursion**: Handles nested directories
 - 🔧 **Universal Support**: Text, binary, and Unicode files
 - ⚡ **Advanced Filtering**: Powerful include/exclude patterns
-- 📊 **Progress Tracking**: Beautiful progress bars
+- 🌐 **GitHub Integration**: Direct repository cloning and combining
+- 📊 **Progress Tracking**: Beautiful progress bars with rich terminal output
 - 🎯 **Cross-Platform**: Linux, macOS, Windows
 - 🛡️ **Robust**: Comprehensive error handling and validation
 
@@ -43,12 +45,21 @@ pdm install -G dev
 file-combiner combine . my-project.txt \
   --exclude "__pycache__/**" --exclude "__pypackages__/**"
 
+# Multi-format output with auto-detection
+file-combiner combine . project.json    # → JSON format (auto-detected)
+file-combiner combine . project.xml     # → XML format (auto-detected)
+file-combiner combine . project.md      # → Markdown format (auto-detected)
+file-combiner combine . project.yaml    # → YAML format (auto-detected)
+
+# Manual format override
+file-combiner combine . report.txt --format markdown  # → Markdown in .txt file
+
 # Combine a GitHub repository directly
 file-combiner combine https://github.com/davidlu1001/file-combiner repo-archive.txt \
   --exclude "__pycache__/**" --exclude ".git/**"
 
-# Combine with compression
-file-combiner combine /path/to/repo combined.txt.gz --compress \
+# Combine with compression (works with all formats)
+file-combiner combine /path/to/repo combined.json.gz --compress \
   --exclude "__pycache__/**" --exclude "*.pyc"
 
 # Split archive back to original structure
@@ -109,6 +120,90 @@ file-combiner combine ~/project backup-$(date +%Y%m%d).txt.gz \
   --compress --verbose --exclude "*.log"
 ```
 
+## 🎨 Multi-Format Output
+
+File-combiner supports 5 output formats, each optimized for different use cases:
+
+### 📄 **TXT Format** (Default)
+Traditional plain text format with enhanced headers and metadata.
+```bash
+file-combiner combine . output.txt
+# Auto-detected from .txt extension
+```
+
+### 🏷️ **XML Format**
+Structured XML with metadata attributes, perfect for enterprise workflows.
+```bash
+file-combiner combine . output.xml
+# Auto-detected from .xml extension
+```
+
+### 📋 **JSON Format**
+Structured JSON ideal for APIs and programmatic processing.
+```bash
+file-combiner combine . output.json
+# Auto-detected from .json extension
+```
+
+### 📝 **Markdown Format**
+Beautiful formatted output with syntax highlighting and table of contents.
+```bash
+file-combiner combine . output.md
+# Auto-detected from .md/.markdown extension
+```
+
+### ⚙️ **YAML Format**
+Human-readable configuration-style format.
+```bash
+file-combiner combine . output.yaml
+# Auto-detected from .yaml/.yml extension
+```
+
+### 🎯 **Format Selection**
+
+**Auto-Detection** (Recommended):
+```bash
+file-combiner combine . project.json    # → JSON format
+file-combiner combine . project.xml     # → XML format
+file-combiner combine . project.md      # → Markdown format
+```
+
+**Manual Override**:
+```bash
+file-combiner combine . data.txt --format json     # JSON in .txt file
+file-combiner combine . report.xml --format markdown  # Markdown in .xml file
+```
+
+**With Compression** (All formats supported):
+```bash
+file-combiner combine . archive.json.gz --compress
+file-combiner combine . docs.md.gz --format markdown --compress
+```
+
+### 🎨 **Format Comparison**
+
+| Format       | Best For                              | Features                   | Size   |
+| ------------ | ------------------------------------- | -------------------------- | ------ |
+| **TXT**      | Traditional workflows, simple sharing | Enhanced headers, metadata | Medium |
+| **XML**      | Enterprise, structured data           | Attributes, validation     | Large  |
+| **JSON**     | APIs, data processing                 | Structured, parseable      | Medium |
+| **Markdown** | Documentation, AI training            | Syntax highlighting, TOC   | Medium |
+| **YAML**     | Configuration, human-readable         | Clean format, hierarchical | Small  |
+
+### 🤖 **AI-Optimized Formats**
+
+For AI agents and code analysis:
+```bash
+# Markdown with syntax highlighting (recommended for AI)
+file-combiner combine . ai-training.md --exclude "__pycache__/**"
+
+# JSON for programmatic processing
+file-combiner combine . data-analysis.json --exclude "node_modules/**"
+
+# YAML for configuration-style output
+file-combiner combine . config-review.yaml --exclude ".git/**"
+```
+
 ## ⚙️ Configuration
 
 Create `~/.config/file-combiner/config`:
@@ -164,11 +259,19 @@ pdm run mypy file_combiner.py
 
 # Run tests with coverage
 pdm run pytest --cov=file_combiner
+
+# Demo multi-format output
+make multi-format-demo
 ```
 
-## 🎉 Recent Updates (v2.0.1)
+## 🎉 Recent Updates (v2.0.2)
 
 ### ✨ New Features
+- 🎨 **Multi-Format Output** - TXT, XML, JSON, Markdown, YAML with intelligent auto-detection
+- 🎯 **Smart Language Detection** - 40+ programming languages with syntax highlighting
+- 📝 **Enhanced Markdown Format** - Table of contents, syntax highlighting, rich metadata
+- 🔧 **Format Auto-Detection** - Automatically detects format from file extension
+- 🗜️ **Universal Compression** - All formats work seamlessly with gzip compression
 - ✅ **GitHub URL support** - Clone and combine repositories directly from GitHub URLs
 - ✅ **Rich terminal output** with beautiful colored progress bars and formatting
 - ✅ **PDM dependency management** for modern Python project workflow

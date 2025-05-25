@@ -16,7 +16,7 @@ import base64
 
 # Add parent directory to path to import file_combiner
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from file_combiner import FileCombiner, FileCombinerError
+from file_combiner import FileCombiner, FileCombinerError, __version__
 
 
 class TestFileCombiner:
@@ -773,6 +773,274 @@ exclude_patterns = ["*.test", "temp/*"]
         assert not combiner._is_github_url("/local/path")
         assert not combiner._is_github_url("not-a-url")
         assert not combiner._is_github_url("")
+
+    def test_detect_output_format(self, combiner):
+        """Test output format detection"""
+        from pathlib import Path
+
+        # Test format argument takes precedence
+        assert combiner._detect_output_format(Path("test.txt"), "json") == "json"
+        assert combiner._detect_output_format(Path("test.xml"), "yaml") == "yaml"
+
+        # Test extension-based detection
+        assert combiner._detect_output_format(Path("test.txt")) == "txt"
+        assert combiner._detect_output_format(Path("test.xml")) == "xml"
+        assert combiner._detect_output_format(Path("test.json")) == "json"
+        assert combiner._detect_output_format(Path("test.md")) == "markdown"
+        assert combiner._detect_output_format(Path("test.markdown")) == "markdown"
+        assert combiner._detect_output_format(Path("test.yml")) == "yaml"
+        assert combiner._detect_output_format(Path("test.yaml")) == "yaml"
+
+        # Test default fallback
+        assert combiner._detect_output_format(Path("test.unknown")) == "txt"
+        assert combiner._detect_output_format(Path("test")) == "txt"
+
+    def test_detect_language(self, combiner):
+        """Test programming language detection for syntax highlighting"""
+        # Test common languages
+        assert combiner._detect_language("test.py") == "python"
+        assert combiner._detect_language("test.js") == "javascript"
+        assert combiner._detect_language("test.java") == "java"
+        assert combiner._detect_language("test.cpp") == "cpp"
+        assert combiner._detect_language("test.html") == "html"
+        assert combiner._detect_language("test.css") == "css"
+        assert combiner._detect_language("test.json") == "json"
+        assert combiner._detect_language("test.yaml") == "yaml"
+        assert combiner._detect_language("test.md") == "markdown"
+
+        # Test case insensitivity
+        assert combiner._detect_language("TEST.PY") == "python"
+        assert combiner._detect_language("Test.JS") == "javascript"
+
+        # Test unknown extensions
+        assert combiner._detect_language("test.unknown") == ""
+        assert combiner._detect_language("test") == ""
+
+
+class TestMultiFormatOutput:
+    """Test multi-format output functionality"""
+
+    @pytest.fixture
+    def temp_dir(self):
+        temp_dir = tempfile.mkdtemp()
+        yield Path(temp_dir)
+        shutil.rmtree(temp_dir)
+
+    @pytest.fixture
+    def combiner(self):
+        return FileCombiner({"verbose": False})
+
+    @pytest.fixture
+    def sample_project(self, temp_dir):
+        """Create a small sample project for testing formats"""
+        project_dir = temp_dir / "sample_project"
+        project_dir.mkdir()
+
+        # Create sample files
+        (project_dir / "main.py").write_text('print("Hello, World!")\n')
+        (project_dir / "config.json").write_text('{"name": "test", "version": "1.0"}\n')
+        (project_dir / "README.md").write_text("# Test Project\n\nThis is a test.\n")
+        (project_dir / "script.js").write_text('console.log("Hello from JS");\n')
+
+        return project_dir
+
+    @pytest.mark.asyncio
+    async def test_txt_format_output(self, combiner, sample_project, temp_dir):
+        """Test TXT format output (default)"""
+        output_file = temp_dir / "output.txt"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="txt"
+        )
+        assert success
+        assert output_file.exists()
+
+        content = output_file.read_text(encoding="utf-8")
+        assert "Enhanced Combined Files Archive" in content
+        assert "FILE_METADATA:" in content
+        assert "=== FILE_SEPARATOR ===" in content
+        assert 'print("Hello, World!")' in content
+
+    @pytest.mark.asyncio
+    async def test_xml_format_output(self, combiner, sample_project, temp_dir):
+        """Test XML format output"""
+        output_file = temp_dir / "output.xml"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="xml"
+        )
+        assert success
+        assert output_file.exists()
+
+        content = output_file.read_text(encoding="utf-8")
+        assert '<?xml version="1.0" encoding="UTF-8"?>' in content
+        assert "<file_archive" in content
+        assert "<file " in content
+        assert "path=" in content
+        assert 'print("Hello, World!")' in content
+
+    @pytest.mark.asyncio
+    async def test_json_format_output(self, combiner, sample_project, temp_dir):
+        """Test JSON format output"""
+        output_file = temp_dir / "output.json"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="json"
+        )
+        assert success
+        assert output_file.exists()
+
+        # Verify it's valid JSON
+        import json
+
+        with open(output_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        assert "metadata" in data
+        assert "files" in data
+        assert data["metadata"]["version"] == __version__
+        assert len(data["files"]) == 4  # 4 sample files
+
+        # Check file content is preserved
+        py_file = next(f for f in data["files"] if f["path"].endswith("main.py"))
+        assert 'print("Hello, World!")' in py_file["content"]
+
+    @pytest.mark.asyncio
+    async def test_markdown_format_output(self, combiner, sample_project, temp_dir):
+        """Test Markdown format output"""
+        output_file = temp_dir / "output.md"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="markdown"
+        )
+        assert success
+        assert output_file.exists()
+
+        content = output_file.read_text(encoding="utf-8")
+        assert "# Combined Files Archive" in content
+        assert "## Table of Contents" in content
+        assert "```python" in content  # Syntax highlighting for Python
+        assert "```javascript" in content  # Syntax highlighting for JS
+        assert "```json" in content  # Syntax highlighting for JSON
+        assert 'print("Hello, World!")' in content
+
+    @pytest.mark.asyncio
+    async def test_yaml_format_output(self, combiner, sample_project, temp_dir):
+        """Test YAML format output"""
+        output_file = temp_dir / "output.yaml"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="yaml"
+        )
+        assert success
+        assert output_file.exists()
+
+        content = output_file.read_text(encoding="utf-8")
+        assert "# Combined Files Archive" in content
+        assert f"version: {__version__}" in content
+        assert "files:" in content
+        assert "  - path:" in content
+        assert "    content: |" in content
+        assert 'print("Hello, World!")' in content
+
+    @pytest.mark.asyncio
+    async def test_format_detection_from_extension(
+        self, combiner, sample_project, temp_dir
+    ):
+        """Test automatic format detection from file extension"""
+        # Test XML detection
+        xml_file = temp_dir / "auto.xml"
+        success = await combiner.combine_files(sample_project, xml_file, progress=False)
+        assert success
+        content = xml_file.read_text(encoding="utf-8")
+        assert '<?xml version="1.0" encoding="UTF-8"?>' in content
+
+        # Test JSON detection
+        json_file = temp_dir / "auto.json"
+        success = await combiner.combine_files(
+            sample_project, json_file, progress=False
+        )
+        assert success
+        content = json_file.read_text(encoding="utf-8")
+        assert '"metadata"' in content
+
+        # Test Markdown detection
+        md_file = temp_dir / "auto.md"
+        success = await combiner.combine_files(sample_project, md_file, progress=False)
+        assert success
+        content = md_file.read_text(encoding="utf-8")
+        assert "# Combined Files Archive" in content
+
+    @pytest.mark.asyncio
+    async def test_format_override_extension(self, combiner, sample_project, temp_dir):
+        """Test that format argument overrides file extension"""
+        # Use .txt extension but force JSON format
+        output_file = temp_dir / "override.txt"
+
+        success = await combiner.combine_files(
+            sample_project, output_file, progress=False, format_type="json"
+        )
+        assert success
+
+        # Should be JSON despite .txt extension
+        import json
+
+        with open(output_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        assert "metadata" in data
+        assert "files" in data
+
+    @pytest.mark.asyncio
+    async def test_compressed_formats(self, combiner, sample_project, temp_dir):
+        """Test that formats work with compression"""
+        # Test compressed JSON
+        json_gz_file = temp_dir / "compressed.json.gz"
+
+        success = await combiner.combine_files(
+            sample_project,
+            json_gz_file,
+            compress=True,
+            progress=False,
+            format_type="json",
+        )
+        assert success
+        assert json_gz_file.exists()
+
+        # Verify compressed JSON is valid
+        import gzip
+        import json
+
+        with gzip.open(json_gz_file, "rt", encoding="utf-8") as f:
+            data = json.load(f)
+        assert "metadata" in data
+        assert "files" in data
+
+    @pytest.mark.asyncio
+    async def test_binary_files_in_formats(self, combiner, temp_dir):
+        """Test that binary files are handled correctly in all formats"""
+        project_dir = temp_dir / "binary_test"
+        project_dir.mkdir()
+
+        # Create a binary file and a text file
+        (project_dir / "binary.bin").write_bytes(b"\x00\x01\x02\x03\xff\xfe\xfd")
+        (project_dir / "text.txt").write_text("Normal text")
+
+        # Test JSON format with binary files
+        json_file = temp_dir / "binary.json"
+        success = await combiner.combine_files(
+            project_dir, json_file, progress=False, format_type="json"
+        )
+        assert success
+
+        import json
+
+        with open(json_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # Find binary file in data
+        binary_file = next(f for f in data["files"] if f["path"].endswith("binary.bin"))
+        assert binary_file["is_binary"] == True
+        assert binary_file["encoding"] == "base64"
 
 
 class TestEdgeCases:

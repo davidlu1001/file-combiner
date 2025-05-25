@@ -26,6 +26,7 @@ help:
 	@echo "  make clean           - Clean temporary files"
 	@echo "  make examples        - Run local examples"
 	@echo "  make github-demo     - Demo GitHub URL support"
+	@echo "  make multi-format-demo - Demo multi-format output (XML, JSON, Markdown, YAML)"
 install:
 	@echo "$(GREEN)Installing dependencies with PDM...$(NC)"
 	$(PDM) install
@@ -86,3 +87,54 @@ run-help:
 demo:
 	file-combiner combine . demo.txt --dry-run --verbose \
 		--exclude "__pycache__/**" --exclude "__pypackages__/**"
+
+multi-format-demo: ## Demonstrate multi-format output capabilities
+	@echo "$(BLUE)🎨 Multi-Format Output Demo$(NC)"
+	@echo "============================"
+
+	@echo "\n$(GREEN)🚀 Creating demo project...$(NC)"
+	@mkdir -p format_demo
+	@echo 'def hello_world():\n    """A simple greeting function"""\n    print("Hello, World!")\n\nif __name__ == "__main__":\n    hello_world()' > format_demo/main.py
+	@echo 'const greeting = "Hello from JavaScript!";\nconsole.log(greeting);\n\nfunction add(a, b) {\n    return a + b;\n}' > format_demo/script.js
+	@echo '# Format Demo Project\n\nThis project demonstrates **file-combiner** multi-format output.\n\n## Features\n- Python code\n- JavaScript code\n- JSON configuration' > format_demo/README.md
+	@echo '{\n  "name": "format-demo",\n  "version": "1.0.0",\n  "description": "Multi-format demo"\n}' > format_demo/config.json
+	@echo "$(GREEN)✅ Demo project created$(NC)"
+
+	@echo "\n$(YELLOW)📄 Generating TXT format (default)...$(NC)"
+	file-combiner combine format_demo/ output.txt --exclude "__pycache__/**"
+	@echo "$(GREEN)✅ TXT format: output.txt$(NC)"
+
+	@echo "\n$(YELLOW)🏷️  Generating XML format...$(NC)"
+	file-combiner combine format_demo/ output.xml --exclude "__pycache__/**"
+	@echo "$(GREEN)✅ XML format: output.xml$(NC)"
+
+	@echo "\n$(YELLOW)📋 Generating JSON format...$(NC)"
+	file-combiner combine format_demo/ output.json --exclude "__pycache__/**"
+	@echo "$(GREEN)✅ JSON format: output.json$(NC)"
+
+	@echo "\n$(YELLOW)📝 Generating Markdown format...$(NC)"
+	file-combiner combine format_demo/ output.md --exclude "__pycache__/**"
+	@echo "$(GREEN)✅ Markdown format: output.md$(NC)"
+
+	@echo "\n$(YELLOW)⚙️  Generating YAML format...$(NC)"
+	file-combiner combine format_demo/ output.yaml --exclude "__pycache__/**"
+	@echo "$(GREEN)✅ YAML format: output.yaml$(NC)"
+
+	@echo "\n$(BLUE)🔍 Format comparison (first 5 lines each):$(NC)"
+	@echo "\n$(CYAN)--- TXT Format ---$(NC)"
+	@head -5 output.txt
+	@echo "\n$(CYAN)--- XML Format ---$(NC)"
+	@head -5 output.xml
+	@echo "\n$(CYAN)--- JSON Format ---$(NC)"
+	@head -5 output.json
+	@echo "\n$(CYAN)--- Markdown Format ---$(NC)"
+	@head -5 output.md
+	@echo "\n$(CYAN)--- YAML Format ---$(NC)"
+	@head -5 output.yaml
+
+	@echo "\n$(BLUE)📊 File sizes:$(NC)"
+	@ls -lh output.* | awk '{print $$9 ": " $$5}'
+
+	@echo "\n$(GREEN)🧹 Cleaning up...$(NC)"
+	@rm -rf format_demo output.*
+	@echo "$(GREEN)✅ Multi-format demo complete!$(NC)"

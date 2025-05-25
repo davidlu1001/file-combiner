@@ -215,6 +215,42 @@ class FileCombiner:
             self.logger.error(f"Error cloning repository: {e}")
             return None
 
+    def _detect_output_format(
+        self, output_path: Path, format_arg: Optional[str] = None
+    ) -> str:
+        """Detect output format from file extension or format argument"""
+        if format_arg:
+            return format_arg.lower()
+
+        # Detect from file extension
+        suffix = output_path.suffix.lower()
+
+        format_map = {
+            ".txt": "txt",
+            ".xml": "xml",
+            ".json": "json",
+            ".md": "markdown",
+            ".markdown": "markdown",
+            ".yml": "yaml",
+            ".yaml": "yaml",
+        }
+
+        return format_map.get(suffix, "txt")
+
+    def _validate_format_compatibility(
+        self, output_path: Path, format_type: str
+    ) -> bool:
+        """Validate that format is compatible with output path and compression"""
+        # Check if compression is requested with incompatible formats
+        is_compressed = output_path.suffix.lower() == ".gz"
+
+        if is_compressed and format_type in ["xml", "json", "markdown", "yaml"]:
+            self.logger.warning(
+                f"Compression with {format_type} format may affect readability"
+            )
+
+        return True
+
     def _default_excludes(self) -> List[str]:
         """Default exclusion patterns optimized for development"""
         return [
@@ -532,6 +568,7 @@ class FileCombiner:
         output_path: Union[str, Path],
         compress: bool = False,
         progress: bool = True,
+        format_type: Optional[str] = None,
     ) -> bool:
         """Combine files with comprehensive error handling and validation"""
         try:
@@ -546,6 +583,15 @@ class FileCombiner:
                 source_path = Path(source_path).resolve()
 
             output_path = Path(output_path).resolve()
+
+            # Detect and validate output format
+            detected_format = self._detect_output_format(output_path, format_type)
+            if self.verbose:
+                self.logger.debug(
+                    f"Detected output format: {detected_format} for {output_path}"
+                )
+            if not self._validate_format_compatibility(output_path, detected_format):
+                return False
 
             # Validation
             if not source_path.exists():
@@ -680,7 +726,7 @@ class FileCombiner:
 
             # Write archive
             success = await self._write_archive(
-                output_path, source_path, processed_files, compress
+                output_path, source_path, processed_files, compress, detected_format
             )
 
             if success:
@@ -869,6 +915,7 @@ class FileCombiner:
         source_path: Path,
         processed_files: List[Tuple[FileMetadata, bytes]],
         compress: bool,
+        format_type: str = "txt",
     ) -> bool:
         """Write archive with atomic operations and proper error handling"""
         temp_file = None
@@ -891,10 +938,14 @@ class FileCombiner:
                     encoding="utf-8",
                     compresslevel=self.compression_level,
                 ) as f:
-                    await self._write_archive_content(f, source_path, processed_files)
+                    await self._write_format_content(
+                        f, source_path, processed_files, format_type
+                    )
             else:
                 with open(temp_file.name, "w", encoding="utf-8") as f:
-                    await self._write_archive_content(f, source_path, processed_files)
+                    await self._write_format_content(
+                        f, source_path, processed_files, format_type
+                    )
 
             # Atomic move to final location
             shutil.move(temp_file.name, output_path)
@@ -944,6 +995,214 @@ class FileCombiner:
 
             # Add separator after content
             f.write("\n")
+
+    async def _write_format_content(
+        self,
+        f,
+        source_path: Path,
+        processed_files: List[Tuple[FileMetadata, bytes]],
+        format_type: str,
+    ):
+        """Dispatch to appropriate format writer"""
+        if format_type == "xml":
+            await self._write_xml_format(f, source_path, processed_files)
+        elif format_type == "json":
+            await self._write_json_format(f, source_path, processed_files)
+        elif format_type == "markdown":
+            await self._write_markdown_format(f, source_path, processed_files)
+        elif format_type == "yaml":
+            await self._write_yaml_format(f, source_path, processed_files)
+        else:  # Default to txt format
+            await self._write_archive_content(f, source_path, processed_files)
+
+    async def _write_xml_format(
+        self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
+    ):
+        """Write archive in XML format"""
+        import xml.etree.ElementTree as ET
+
+        # Create root element
+        root = ET.Element("file_archive")
+        root.set("version", __version__)
+        root.set("created", time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()))
+        root.set("source", str(source_path))
+        root.set("total_files", str(len(processed_files)))
+        root.set("total_size", str(self.stats["bytes_processed"]))
+
+        # Add files
+        for metadata, content in processed_files:
+            file_elem = ET.SubElement(root, "file")
+
+            # Add metadata as attributes
+            for key, value in asdict(metadata).items():
+                if value is not None:
+                    file_elem.set(key, str(value))
+
+            # Add content
+            if metadata.is_binary:
+                file_elem.text = content.decode("ascii")
+            else:
+                file_elem.text = content.decode("utf-8")
+
+        # Write XML with declaration
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        ET.indent(root, space="  ")
+        f.write(ET.tostring(root, encoding="unicode"))
+
+    async def _write_json_format(
+        self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
+    ):
+        """Write archive in JSON format"""
+        archive_data = {
+            "metadata": {
+                "version": __version__,
+                "created": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+                "source": str(source_path),
+                "total_files": len(processed_files),
+                "total_size": self.stats["bytes_processed"],
+            },
+            "files": [],
+        }
+
+        for metadata, content in processed_files:
+            file_data = asdict(metadata)
+
+            if metadata.is_binary:
+                file_data["content"] = content.decode("ascii")
+            else:
+                file_data["content"] = content.decode("utf-8")
+
+            archive_data["files"].append(file_data)
+
+        json.dump(archive_data, f, indent=2, ensure_ascii=False)
+
+    async def _write_markdown_format(
+        self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
+    ):
+        """Write archive in Markdown format with syntax highlighting"""
+        # Write header
+        f.write(f"# Combined Files Archive\n\n")
+        f.write(f"**Generated by:** file-combiner v{__version__}  \n")
+        f.write(
+            f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  \n"
+        )
+        f.write(f"**Source:** `{source_path}`  \n")
+        f.write(f"**Total files:** {len(processed_files)}  \n")
+        f.write(
+            f"**Total size:** {self._format_size(self.stats['bytes_processed'])}  \n\n"
+        )
+
+        # Table of contents
+        f.write("## Table of Contents\n\n")
+        for i, (metadata, _) in enumerate(processed_files, 1):
+            f.write(
+                f"{i}. [{metadata.path}](#{metadata.path.replace('/', '').replace('.', '')})\n"
+            )
+        f.write("\n")
+
+        # Write files
+        for metadata, content in processed_files:
+            f.write(f"## {metadata.path}\n\n")
+            f.write(f"**Size:** {self._format_size(metadata.size)}  \n")
+            f.write(
+                f"**Modified:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.mtime))}  \n"
+            )
+            f.write(f"**Encoding:** {metadata.encoding}  \n")
+            f.write(f"**Binary:** {'Yes' if metadata.is_binary else 'No'}  \n\n")
+
+            if metadata.is_binary:
+                f.write("```\n")
+                f.write(content.decode("ascii"))
+                f.write("\n```\n\n")
+            else:
+                # Detect language for syntax highlighting
+                lang = self._detect_language(metadata.path)
+                f.write(f"```{lang}\n")
+                f.write(content.decode("utf-8"))
+                f.write("\n```\n\n")
+
+    async def _write_yaml_format(
+        self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
+    ):
+        """Write archive in YAML format"""
+        # Write header
+        f.write("# Combined Files Archive\n")
+        f.write(f"version: {__version__}\n")
+        f.write(f"created: '{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}'\n")
+        f.write(f"source: '{source_path}'\n")
+        f.write(f"total_files: {len(processed_files)}\n")
+        f.write(f"total_size: {self.stats['bytes_processed']}\n\n")
+        f.write("files:\n")
+
+        for metadata, content in processed_files:
+            f.write(f"  - path: '{metadata.path}'\n")
+            f.write(f"    size: {metadata.size}\n")
+            f.write(f"    mtime: {metadata.mtime}\n")
+            f.write(f"    encoding: '{metadata.encoding}'\n")
+            f.write(f"    is_binary: {str(metadata.is_binary).lower()}\n")
+
+            if metadata.is_binary:
+                content_str = content.decode("ascii")
+            else:
+                content_str = content.decode("utf-8")
+
+            # Escape and format content for YAML
+            content_lines = content_str.split("\n")
+            f.write("    content: |\n")
+            for line in content_lines:
+                f.write(f"      {line}\n")
+            f.write("\n")
+
+    def _detect_language(self, file_path: str) -> str:
+        """Detect programming language from file extension for syntax highlighting"""
+        ext = Path(file_path).suffix.lower()
+        lang_map = {
+            ".py": "python",
+            ".js": "javascript",
+            ".ts": "typescript",
+            ".java": "java",
+            ".cpp": "cpp",
+            ".c": "c",
+            ".h": "c",
+            ".cs": "csharp",
+            ".php": "php",
+            ".rb": "ruby",
+            ".go": "go",
+            ".rs": "rust",
+            ".swift": "swift",
+            ".kt": "kotlin",
+            ".scala": "scala",
+            ".sh": "bash",
+            ".bash": "bash",
+            ".zsh": "zsh",
+            ".fish": "fish",
+            ".ps1": "powershell",
+            ".sql": "sql",
+            ".html": "html",
+            ".xml": "xml",
+            ".css": "css",
+            ".scss": "scss",
+            ".sass": "sass",
+            ".less": "less",
+            ".json": "json",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".toml": "toml",
+            ".ini": "ini",
+            ".cfg": "ini",
+            ".conf": "ini",
+            ".md": "markdown",
+            ".rst": "rst",
+            ".tex": "latex",
+            ".r": "r",
+            ".m": "matlab",
+            ".pl": "perl",
+            ".lua": "lua",
+            ".vim": "vim",
+            ".dockerfile": "dockerfile",
+            ".makefile": "makefile",
+        }
+        return lang_map.get(ext, "")
 
     async def split_files(
         self,
@@ -1412,6 +1671,12 @@ Examples:
         help="Compression level",
     )
     parser.add_argument(
+        "--format",
+        choices=["txt", "xml", "json", "markdown", "yaml"],
+        default=None,
+        help="Output format (txt, xml, json, markdown, yaml). Auto-detected from file extension if not specified.",
+    )
+    parser.add_argument(
         "--no-progress", action="store_true", help="Disable progress bars"
     )
 
@@ -1483,6 +1748,7 @@ Examples:
                 args.output_path,
                 compress=args.compress,
                 progress=progress,
+                format_type=args.format,
             )
         elif args.operation == "split":
             success = await combiner.split_files(
