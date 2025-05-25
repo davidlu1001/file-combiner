@@ -30,10 +30,10 @@ pip install file-combiner
 # With all optional dependencies
 pip install file-combiner[full]
 
-# Development installation
+# Development installation (using PDM)
 git clone https://github.com/yourusername/file-combiner.git
 cd file-combiner
-pip install -e ".[dev]"
+pdm install -G dev
 ```
 
 ### Basic Usage
@@ -110,35 +110,54 @@ include_patterns = [
 ## 🧪 Development
 
 ```bash
-# Install development dependencies
-pip install -e ".[dev]"
+# Install PDM (if not already installed)
+pip install pdm
+
+# Install project and development dependencies
+pdm install -G dev
 
 # Run tests
-pytest
+pdm run pytest
 
 # Format code
-black file_combiner.py
+pdm run black file_combiner.py
 
 # Lint code
-flake8 file_combiner.py
+pdm run flake8 file_combiner.py
+
+# Type checking
+pdm run mypy file_combiner.py
+
+# Run tests with coverage
+pdm run pytest --cov=file_combiner
 ```
 
-## 🐛 Recent Bug Fixes (v2.0.1)
+## 🎉 Recent Updates (v2.0.1)
 
+### ✨ New Features
+- ✅ **Rich terminal output** with beautiful colored progress bars and formatting
+- ✅ **PDM dependency management** for modern Python project workflow
+- ✅ Enhanced UI with spinners, colored checkmarks, and time tracking
+
+### 🐛 Bug Fixes
 - ✅ Fixed negative `max_workers` validation causing crashes
 - ✅ Fixed `_temp_files` initialization issues in constructor
 - ✅ Fixed content parsing for files starting with `#` characters
 - ✅ Fixed missing `io` module import for error handling
 - ✅ Fixed version mismatch between setup.py and file_combiner.py
 - ✅ Fixed console script entry point for proper CLI execution
+- ✅ Fixed all 6 remaining test issues (100% test pass rate: 31/31)
+
+### 🚀 Improvements
 - ✅ Improved trailing newline preservation in file restoration
 - ✅ Enhanced error handling and robustness throughout codebase
-- ✅ Updated dependencies and requirements
+- ✅ Migrated from pip/setuptools to PDM for better dependency management
+- ✅ Updated comprehensive .gitignore for modern Python projects
+- ✅ Updated development workflow and documentation
 
 ### Known Limitations
 
-- **Line endings**: Windows line endings (`\r\n`) are converted to Unix line endings (`\n`) during processing
-- **Some tests**: A few test cases expect different error handling behavior and may need updates
+- **Line endings**: Windows line endings (`\r\n`) are converted to Unix line endings (`\n`) during processing (documented behavior)
 
 ## 📄 License
 

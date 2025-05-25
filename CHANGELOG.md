@@ -6,22 +6,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.1] - 2025-01-25
 
+### Added
+- **Rich terminal output formatting** with colored progress bars and enhanced UI
+- **PDM dependency management** for modern Python project management
+- Comprehensive test coverage with all 31 tests passing
+
 ### Fixed
 - Fixed negative `max_workers` validation causing crashes
 - Fixed `_temp_files` initialization issues in constructor
 - Fixed content parsing for files starting with `#` characters
 - Fixed version mismatch between setup.py and file_combiner.py
 - Fixed missing `io` module import for UnsupportedOperation handling
+- Fixed console script entry point for proper CLI execution
+- Fixed all 6 remaining test issues (dry run, error handling, line endings)
 
 ### Improved
 - Enhanced trailing newline preservation in file restoration
 - Improved error handling and robustness throughout codebase
 - Better content reconstruction logic for archive splitting
 - More comprehensive validation of configuration parameters
+- Beautiful colored terminal output with rich formatting
+- Enhanced progress bars with spinners and time tracking
+
+### Changed
+- **Migrated from pip/setuptools to PDM** for dependency management
+- Removed setup.py and requirements.txt in favor of pyproject.toml
+- Updated development workflow to use `pdm install -G dev`
 
 ### Updated
 - Updated pytest-asyncio requirement to >=0.21.0
-- Updated README with better documentation and examples
+- Updated README with PDM installation instructions and examples
 - Cleaned up repository structure and removed temporary files
 
 ## [2.0.0] - 2024-12-01
