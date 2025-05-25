@@ -13,7 +13,6 @@ import io
 import json
 import mimetypes
 import os
-import platform
 import re
 import shutil
 import stat
@@ -24,10 +23,26 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import List, Dict, Optional, Union, Iterator, Set, Tuple, Any
+from typing import List, Dict, Optional, Union, Tuple
 import fnmatch
 import logging
-from contextlib import contextmanager
+
+try:
+    from rich.console import Console
+    from rich.progress import (
+        Progress,
+        SpinnerColumn,
+        TextColumn,
+        BarColumn,
+        TimeElapsedColumn,
+        MofNCompleteColumn,
+    )
+
+    HAS_RICH = True
+except ImportError:
+    HAS_RICH = False
+    Console = None
+    Progress = None
 
 try:
     from tqdm import tqdm
@@ -35,42 +50,7 @@ try:
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
-
-    # Fallback progress indicator
-    class tqdm:
-        def __init__(self, iterable=None, total=None, desc=None, unit=None, **kwargs):
-            self.iterable = iterable or []
-            self.total = total or (
-                len(self.iterable) if hasattr(self.iterable, "__len__") else 0
-            )
-            self.desc = desc or ""
-            self.current = 0
-
-        def __iter__(self):
-            for item in self.iterable:
-                yield item
-                self.update(1)
-
-        def update(self, n=1):
-            self.current += n
-            if self.total > 0:
-                percent = (self.current / self.total) * 100
-                print(
-                    f"\r{self.desc}: {self.current}/{self.total} ({percent:.1f}%)",
-                    end="",
-                    flush=True,
-                )
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            if self.total > 0:
-                print()  # New line after progress
-
-        def close(self):
-            if self.total > 0:
-                print()
+    tqdm = None
 
 
 __version__ = "2.0.1"
@@ -129,6 +109,9 @@ class FileCombiner:
 
         # Initialize temporary files list first (needed for cleanup in case of early errors)
         self._temp_files = []
+
+        # Initialize rich console
+        self.console = Console() if HAS_RICH else None
 
         self.logger = self._setup_logging()
 
@@ -444,27 +427,52 @@ class FileCombiner:
 
                     if should_exclude:
                         if self.verbose:
-                            print(f"  ✗ {relative_path} ({reason})")
+                            if HAS_RICH and self.console:
+                                self.console.print(
+                                    f"  [red]✗[/red] {relative_path} ({reason})"
+                                )
+                            else:
+                                print(f"  ✗ {relative_path} ({reason})")
                         skipped_count += 1
                     else:
                         file_size = file_path.stat().st_size
                         is_binary = self._is_binary(file_path)
                         file_type = "binary" if is_binary else "text"
-                        print(
-                            f"  ✓ {relative_path} ({self._format_size(file_size)}, {file_type})"
-                        )
+                        if HAS_RICH and self.console:
+                            self.console.print(
+                                f"  [green]✓[/green] {relative_path} ([blue]{self._format_size(file_size)}[/blue], [yellow]{file_type}[/yellow])"
+                            )
+                        else:
+                            print(
+                                f"  ✓ {relative_path} ({self._format_size(file_size)}, {file_type})"
+                            )
                         total_size += file_size
                         processed_count += 1
 
                 except Exception as e:
-                    print(f"  ✗ {relative_path} (error: {e})")
+                    if HAS_RICH and self.console:
+                        self.console.print(
+                            f"  [red]✗[/red] {relative_path} (error: {e})"
+                        )
+                    else:
+                        print(f"  ✗ {relative_path} (error: {e})")
                     skipped_count += 1
 
-            print(f"\nSummary:")
-            print(
-                f"  Would process: {processed_count} files ({self._format_size(total_size)})"
-            )
-            print(f"  Would skip: {skipped_count} files")
+            # Summary
+            if HAS_RICH and self.console:
+                self.console.print("\n[bold]Summary:[/bold]")
+                self.console.print(
+                    f"  Would process: [green]{processed_count}[/green] files ([blue]{self._format_size(total_size)}[/blue])"
+                )
+                self.console.print(
+                    f"  Would skip: [yellow]{skipped_count}[/yellow] files"
+                )
+            else:
+                print("\nSummary:")
+                print(
+                    f"  Would process: {processed_count} files ({self._format_size(total_size)})"
+                )
+                print(f"  Would skip: {skipped_count} files")
 
             return True
 
@@ -534,39 +542,79 @@ class FileCombiner:
                 }
 
                 # Collect results with progress bar
-                if progress and HAS_TQDM:
+                completed_count = 0
+                if progress and HAS_RICH and self.console:
+                    with Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    ) as progress_bar:
+                        task = progress_bar.add_task(
+                            "Processing files", total=len(all_files)
+                        )
+
+                        for future in as_completed(future_to_file):
+                            completed_count += 1
+                            try:
+                                result = future.result()
+                                if result:
+                                    processed_files.append(result)
+                            except Exception as e:
+                                file_path = future_to_file[future]
+                                self.logger.error(f"Error processing {file_path}: {e}")
+                                self.stats["errors"] += 1
+
+                            progress_bar.update(task, advance=1)
+                elif progress and HAS_TQDM and tqdm:
                     pbar = tqdm(
                         total=len(all_files), desc="Processing files", unit="files"
                     )
+                    for future in as_completed(future_to_file):
+                        completed_count += 1
+                        try:
+                            result = future.result()
+                            if result:
+                                processed_files.append(result)
+                        except Exception as e:
+                            file_path = future_to_file[future]
+                            self.logger.error(f"Error processing {file_path}: {e}")
+                            self.stats["errors"] += 1
+                        pbar.update(1)
+                    pbar.close()
                 elif progress:
                     print(f"Processing {len(all_files)} files...")
+                    for future in as_completed(future_to_file):
+                        completed_count += 1
+                        try:
+                            result = future.result()
+                            if result:
+                                processed_files.append(result)
+                        except Exception as e:
+                            file_path = future_to_file[future]
+                            self.logger.error(f"Error processing {file_path}: {e}")
+                            self.stats["errors"] += 1
 
-                completed_count = 0
-                for future in as_completed(future_to_file):
-                    completed_count += 1
-                    try:
-                        result = future.result()
-                        if result:
-                            processed_files.append(result)
-                    except Exception as e:
-                        file_path = future_to_file[future]
-                        self.logger.error(f"Error processing {file_path}: {e}")
-                        self.stats["errors"] += 1
-
-                    if progress:
-                        if HAS_TQDM:
-                            pbar.update(1)
-                        elif completed_count % 50 == 0:
+                        if completed_count % 50 == 0:
                             print(
                                 f"Processed {completed_count}/{len(all_files)} files...",
                                 end="\r",
                             )
-
-                if progress:
-                    if HAS_TQDM:
-                        pbar.close()
-                    else:
-                        print(f"\nProcessed {completed_count}/{len(all_files)} files")
+                    print(f"\nProcessed {completed_count}/{len(all_files)} files")
+                else:
+                    # No progress display
+                    for future in as_completed(future_to_file):
+                        completed_count += 1
+                        try:
+                            result = future.result()
+                            if result:
+                                processed_files.append(result)
+                        except Exception as e:
+                            file_path = future_to_file[future]
+                            self.logger.error(f"Error processing {file_path}: {e}")
+                            self.stats["errors"] += 1
 
             if not processed_files:
                 self.logger.error("No files were successfully processed")
@@ -946,8 +994,22 @@ class FileCombiner:
                 # If we can't seek (e.g., gzip file), skip progress counting
                 total_files = 0
 
+        # Setup progress tracking
+        progress_bar = None
+        task = None
         if progress and total_files > 0:
-            if HAS_TQDM:
+            if HAS_RICH and self.console:
+                progress_bar = Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    MofNCompleteColumn(),
+                    TimeElapsedColumn(),
+                    console=self.console,
+                )
+                progress_bar.start()
+                task = progress_bar.add_task("Extracting files", total=total_files)
+            elif HAS_TQDM and tqdm:
                 pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
             else:
                 print(f"Extracting {total_files} files...")
@@ -971,10 +1033,12 @@ class FileCombiner:
                             )
                             files_restored += 1
 
-                            if progress:
-                                if HAS_TQDM and total_files > 0:
+                            if progress and total_files > 0:
+                                if progress_bar and task is not None:
+                                    progress_bar.update(task, advance=1)
+                                elif HAS_TQDM and tqdm and "pbar" in locals():
                                     pbar.update(1)
-                                elif total_files > 0 and files_restored % 10 == 0:
+                                elif files_restored % 10 == 0:
                                     print(
                                         f"Extracted {files_restored}/{total_files} files...",
                                         end="\r",
@@ -1024,8 +1088,11 @@ class FileCombiner:
                         output_path, current_metadata, current_encoding, current_content
                     )
                     files_restored += 1
-                    if progress and HAS_TQDM and total_files > 0:
-                        pbar.update(1)
+                    if progress and total_files > 0:
+                        if progress_bar and task is not None:
+                            progress_bar.update(task, advance=1)
+                        elif HAS_TQDM and tqdm and "pbar" in locals():
+                            pbar.update(1)
                 except Exception as e:
                     self.logger.error(
                         f"Failed to restore final file {current_metadata.get('path', 'unknown')}: {e}"
@@ -1033,7 +1100,9 @@ class FileCombiner:
 
         finally:
             if progress:
-                if HAS_TQDM and total_files > 0:
+                if progress_bar:
+                    progress_bar.stop()
+                elif HAS_TQDM and tqdm and "pbar" in locals():
                     pbar.close()
                 elif total_files > 0:
                     print(f"\nExtracted {files_restored} files")

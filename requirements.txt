@@ -1,8 +1,0 @@
-tqdm>=4.60.0  # Progress bars (optional but recommended)
-pytest>=6.0.0
-pytest-asyncio>=0.21.0
-pytest-cov>=3.0.0
-black>=22.0.0
-flake8>=4.0.0
-mypy>=0.950
-isort>=5.10.0

@@ -1,6 +1,55 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["pdm-backend"]
+build-backend = "pdm.backend"
+
+[project]
+name = "file-combiner"
+version = "2.0.1"
+description = "High-performance file combiner for large repositories and AI agents"
+authors = [
+    {name = "File Combiner Project", email = "info@file-combiner.dev"},
+]
+dependencies = [
+    "rich>=13.0.0",
+]
+requires-python = ">=3.8"
+readme = "README.md"
+license = {text = "MIT"}
+keywords = ["file", "combiner", "archive", "ai", "tools"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Tools",
+    "Topic :: System :: Archiving",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/file-combiner"
+Repository = "https://github.com/yourusername/file-combiner"
+"Bug Reports" = "https://github.com/yourusername/file-combiner/issues"
+
+[project.scripts]
+file-combiner = "file_combiner:cli_main"
+
+[project.optional-dependencies]
+progress = ["tqdm>=4.60.0"]
+dev = [
+    "pytest>=6.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "mypy>=0.950",
+    "pytest-cov>=3.0.0",
+]
+full = ["tqdm>=4.60.0"]
 
 [tool.black]
 line-length = 88
