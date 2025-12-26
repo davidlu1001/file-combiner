@@ -1224,6 +1224,89 @@ malicious content
         assert not (parent_dir / "etc" / "malicious.txt").exists()
 
 
+class TestGitignoreSupport:
+    """Test .gitignore integration"""
+
+    @pytest.fixture
+    def temp_dir(self):
+        temp_dir = tempfile.mkdtemp()
+        yield Path(temp_dir)
+        shutil.rmtree(temp_dir)
+
+    @pytest.fixture
+    def combiner(self):
+        return FileCombiner({"verbose": False, "respect_gitignore": True})
+
+    @pytest.fixture
+    def project_with_gitignore(self, temp_dir):
+        """Create a project with .gitignore"""
+        project_dir = temp_dir / "project"
+        project_dir.mkdir()
+
+        # Create .gitignore
+        gitignore = project_dir / ".gitignore"
+        gitignore.write_text("*.secret\nbuild/\n")
+
+        # Create files
+        (project_dir / "main.py").write_text("print('hello')\n")
+        (project_dir / "config.secret").write_text("password=123\n")
+
+        # Create build directory
+        build_dir = project_dir / "build"
+        build_dir.mkdir()
+        (build_dir / "output.bin").write_text("binary\n")
+
+        return project_dir
+
+    @pytest.mark.asyncio
+    async def test_gitignore_respected(self, combiner, project_with_gitignore, temp_dir):
+        """Test that .gitignore patterns are respected"""
+        combined_file = temp_dir / "combined.txt"
+
+        success = await combiner.combine_files(
+            project_with_gitignore, combined_file, progress=False
+        )
+        assert success
+
+        content = combined_file.read_text()
+
+        # main.py should be included
+        assert "main.py" in content
+        # .gitignore itself should be included
+        assert ".gitignore" in content
+        # Secret file should be excluded
+        assert "config.secret" not in content
+        # Build directory should be excluded
+        assert "output.bin" not in content
+
+    @pytest.mark.asyncio
+    async def test_gitignore_can_be_disabled(self, temp_dir):
+        """Test that gitignore can be disabled with respect_gitignore=False"""
+        combiner = FileCombiner({"verbose": False, "respect_gitignore": False})
+
+        project_dir = temp_dir / "project"
+        project_dir.mkdir()
+
+        # Create .gitignore
+        gitignore = project_dir / ".gitignore"
+        gitignore.write_text("*.secret\n")
+
+        # Create files
+        (project_dir / "main.py").write_text("print('hello')\n")
+        (project_dir / "config.secret").write_text("password=123\n")
+
+        combined_file = temp_dir / "combined.txt"
+
+        success = await combiner.combine_files(project_dir, combined_file, progress=False)
+        assert success
+
+        content = combined_file.read_text()
+
+        # Both files should be included when gitignore is disabled
+        assert "main.py" in content
+        assert "config.secret" in content
+
+
 class TestMultiFormatRoundTrip:
     """Test round-trip (combine -> split) for all formats"""
 

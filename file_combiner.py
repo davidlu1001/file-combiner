@@ -7,6 +7,7 @@ High-performance file combiner optimized for large repositories and AI agents
 import argparse
 import asyncio
 import base64
+import difflib
 import gzip
 import hashlib
 import io
@@ -15,6 +16,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -28,6 +30,14 @@ from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 import fnmatch
 import logging
+
+# Optional pathspec for gitignore support
+try:
+    import pathspec
+    HAS_PATHSPEC = True
+except ImportError:
+    HAS_PATHSPEC = False
+    pathspec = None
 
 try:
     from rich.console import Console
@@ -153,6 +163,13 @@ class FileCombiner:
         # TTY detection for progress bars (disable in non-interactive terminals like CI/CD)
         self.is_tty = sys.stdout.isatty()
 
+        # Gitignore support
+        self.respect_gitignore = self.config.get("respect_gitignore", True)
+        self._gitignore_spec = None
+
+        # Signal handling for graceful cleanup
+        self._setup_signal_handlers()
+
         # Statistics
         self.stats = {
             "files_processed": 0,
@@ -179,6 +196,59 @@ class FileCombiner:
             logger.addHandler(handler)
 
         return logger
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful cleanup on interruption"""
+        def signal_handler(signum, frame):
+            """Handle interrupt signals gracefully"""
+            self.logger.warning("Received interrupt signal, cleaning up...")
+            self._cleanup_temp_files()
+            sys.exit(130)  # 128 + SIGINT (2)
+
+        # Only setup handlers for signals available on current platform
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        except (ValueError, OSError):
+            # Signal handling may not be available in all contexts (e.g., threads)
+            pass
+
+    def _load_gitignore(self, source_path: Path) -> None:
+        """Load and parse .gitignore file from source directory"""
+        if not self.respect_gitignore or not HAS_PATHSPEC:
+            return
+
+        gitignore_path = source_path / ".gitignore"
+        if not gitignore_path.exists():
+            return
+
+        try:
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                gitignore_content = f.read()
+
+            # Parse gitignore patterns
+            self._gitignore_spec = pathspec.PathSpec.from_lines(
+                pathspec.patterns.GitWildMatchPattern,
+                gitignore_content.splitlines()
+            )
+
+            if self.verbose:
+                self.logger.debug(f"Loaded .gitignore from {gitignore_path}")
+
+        except Exception as e:
+            if self.verbose:
+                self.logger.warning(f"Failed to parse .gitignore: {e}")
+            self._gitignore_spec = None
+
+    def _matches_gitignore(self, relative_path: str) -> bool:
+        """Check if path matches gitignore patterns"""
+        if self._gitignore_spec is None:
+            return False
+
+        try:
+            return self._gitignore_spec.match_file(relative_path)
+        except Exception:
+            return False
 
     def _is_github_url(self, url_or_path: str) -> bool:
         """Check if the input is a GitHub URL"""
@@ -389,6 +459,10 @@ class FileCombiner:
             # Check file size
             if file_stat.st_size > self.max_file_size:
                 return True, f"too large ({self._format_size(file_stat.st_size)})"
+
+            # Check gitignore patterns first (most common exclusion source)
+            if self._matches_gitignore(relative_path):
+                return True, "matches .gitignore pattern"
 
             # Check exclude patterns
             if self._matches_pattern(relative_path, self.exclude_patterns):
@@ -628,6 +702,12 @@ class FileCombiner:
                 "bytes_processed": 0,
                 "errors": 0,
             }
+
+            # Load .gitignore if present and enabled
+            if self.respect_gitignore:
+                self._load_gitignore(source_path)
+                if self._gitignore_spec and self.verbose:
+                    self.logger.info("Respecting .gitignore patterns")
 
             # Scan files
             self.logger.info(f"Scanning source directory: {source_path}")
@@ -2211,7 +2291,7 @@ Examples:
     )
 
     parser.add_argument(
-        "operation", choices=["combine", "split"], help="Operation to perform"
+        "operation", help="Operation to perform (combine or split)"
     )
     parser.add_argument("input_path", help="Input directory, file, or GitHub URL")
     parser.add_argument("output_path", help="Output file or directory")
@@ -2268,6 +2348,11 @@ Examples:
     parser.add_argument(
         "--no-progress", action="store_true", help="Disable progress bars"
     )
+    parser.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="Ignore .gitignore patterns (include all files that would normally be gitignored)",
+    )
 
     # Configuration
     parser.add_argument(
@@ -2285,6 +2370,25 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Fuzzy command matching for typos
+    valid_operations = ["combine", "split"]
+    if args.operation not in valid_operations:
+        close_matches = difflib.get_close_matches(
+            args.operation, valid_operations, n=1, cutoff=0.6
+        )
+        if close_matches:
+            print(
+                f"Unknown command '{args.operation}'. Did you mean '{close_matches[0]}'?",
+                file=sys.stderr,
+            )
+            print(f"Usage: file-combiner {close_matches[0]} <input> <output>", file=sys.stderr)
+        else:
+            print(
+                f"Unknown command '{args.operation}'. Valid commands: {', '.join(valid_operations)}",
+                file=sys.stderr,
+            )
+        return 1
 
     try:
         # Handle config creation
@@ -2322,6 +2426,7 @@ Examples:
                 "ignore_binary": args.ignore_binary,
                 "dry_run": args.dry_run,
                 "verbose": args.verbose,
+                "respect_gitignore": not args.no_gitignore,
             }
         )
 
