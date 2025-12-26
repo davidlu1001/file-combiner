@@ -720,18 +720,20 @@ class FileCombiner:
             if self.dry_run:
                 return self._dry_run_combine(all_files, source_path)
 
-            # Process files in parallel with progress tracking
-            processed_files = []
+            # Phase 1: Collect metadata in parallel (memory-efficient)
+            # Only stores (metadata, file_path) tuples - NOT file content
+            # This keeps memory usage O(n) for metadata but O(1) for content
+            file_entries: List[Tuple[FileMetadata, Path]] = []
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_file = {
                     executor.submit(
-                        self._process_file_worker, file_path, source_path
+                        self._collect_file_metadata, file_path, source_path
                     ): file_path
                     for file_path in all_files
                 }
 
-                # Collect results with progress bar
+                # Collect metadata with progress bar
                 # Disable rich/tqdm progress bars in non-TTY environments (CI/CD)
                 use_rich_progress = progress and HAS_RICH and self.console and self.is_tty
                 use_tqdm_progress = progress and HAS_TQDM and tqdm and self.is_tty and not use_rich_progress
@@ -747,7 +749,7 @@ class FileCombiner:
                         console=self.console,
                     ) as progress_bar:
                         task = progress_bar.add_task(
-                            "Processing files", total=len(all_files)
+                            "Collecting metadata", total=len(all_files)
                         )
 
                         for future in as_completed(future_to_file):
@@ -755,7 +757,7 @@ class FileCombiner:
                             try:
                                 result = future.result()
                                 if result:
-                                    processed_files.append(result)
+                                    file_entries.append(result)
                             except Exception as e:
                                 file_path = future_to_file[future]
                                 self.logger.error(f"Error processing {file_path}: {e}")
@@ -764,14 +766,14 @@ class FileCombiner:
                             progress_bar.update(task, advance=1)
                 elif use_tqdm_progress:
                     pbar = tqdm(
-                        total=len(all_files), desc="Processing files", unit="files"
+                        total=len(all_files), desc="Collecting metadata", unit="files"
                     )
                     for future in as_completed(future_to_file):
                         completed_count += 1
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
@@ -779,13 +781,13 @@ class FileCombiner:
                         pbar.update(1)
                     pbar.close()
                 elif progress:
-                    print(f"Processing {len(all_files)} files...")
+                    print(f"Collecting metadata for {len(all_files)} files...")
                     for future in as_completed(future_to_file):
                         completed_count += 1
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
@@ -793,10 +795,10 @@ class FileCombiner:
 
                         if completed_count % 50 == 0:
                             print(
-                                f"Processed {completed_count}/{len(all_files)} files...",
+                                f"Collected {completed_count}/{len(all_files)} files...",
                                 end="\r",
                             )
-                    print(f"\nProcessed {completed_count}/{len(all_files)} files")
+                    print(f"\nCollected metadata for {completed_count}/{len(all_files)} files")
                 else:
                     # No progress display
                     for future in as_completed(future_to_file):
@@ -804,22 +806,23 @@ class FileCombiner:
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
                             self.stats["errors"] += 1
 
-            if not processed_files:
+            if not file_entries:
                 self.logger.error("No files were successfully processed")
                 return False
 
             # Sort files by path for consistent output
-            processed_files.sort(key=lambda x: x[0].path)
+            file_entries.sort(key=lambda x: x[0].path)
 
-            # Write archive
-            success = await self._write_archive(
-                output_path, source_path, processed_files, compress, detected_format
+            # Phase 2: Write archive with streaming (O(1) memory for content)
+            # Content is read on-demand for each file, not held in memory
+            success = await self._write_archive_streaming(
+                output_path, source_path, file_entries, compress, detected_format
             )
 
             if success:
@@ -944,6 +947,68 @@ class FileCombiner:
             self.stats["errors"] += 1
             return None
 
+    def _collect_file_metadata(
+        self, file_path: Path, base_path: Path
+    ) -> Optional[Tuple[FileMetadata, Path]]:
+        """
+        Collect file metadata without reading content (memory-efficient).
+
+        Returns (metadata, file_path) tuple for streaming write phase.
+        Content is read on-demand during write to maintain O(1) memory usage.
+        """
+        try:
+            # Calculate relative path
+            try:
+                relative_path = str(file_path.relative_to(base_path))
+            except ValueError:
+                self.logger.warning(f"Cannot determine relative path for {file_path}")
+                return None
+
+            # Normalize path separators
+            relative_path = relative_path.replace("\\", "/")
+
+            # Apply include/exclude filters
+            should_exclude, reason = self._should_exclude(file_path, relative_path)
+            if should_exclude:
+                if self.verbose:
+                    self.logger.debug(f"Excluding {relative_path}: {reason}")
+                self.stats["files_skipped"] += 1
+                return None
+
+            # Get file stats
+            file_stat = file_path.stat()
+            is_binary = self._is_binary(file_path)
+
+            # Create metadata
+            metadata = FileMetadata(
+                path=relative_path,
+                size=file_stat.st_size,
+                mtime=file_stat.st_mtime,
+                mode=file_stat.st_mode,
+                is_binary=is_binary,
+                encoding="base64" if is_binary else "utf-8",
+                mime_type=mimetypes.guess_type(str(file_path))[0],
+            )
+
+            # Add checksum if requested
+            if self.calculate_checksums:
+                metadata.checksum = self._calculate_checksum(file_path)
+
+            self.stats["files_processed"] += 1
+            self.stats["bytes_processed"] += metadata.size
+
+            if self.verbose:
+                self.logger.debug(
+                    f"Collected metadata for {relative_path} ({self._format_size(metadata.size)})"
+                )
+
+            return (metadata, file_path)
+
+        except Exception as e:
+            self.logger.error(f"Error collecting metadata for {file_path}: {e}")
+            self.stats["errors"] += 1
+            return None
+
     def _read_file_content(
         self, file_path: Path, metadata: FileMetadata
     ) -> Optional[bytes]:
@@ -1055,6 +1120,311 @@ class FileCombiner:
                 except OSError:
                     pass
             return False
+
+    async def _write_archive_streaming(
+        self,
+        output_path: Path,
+        source_path: Path,
+        file_entries: List[Tuple[FileMetadata, Path]],
+        compress: bool,
+        format_type: str = "txt",
+    ) -> bool:
+        """
+        Write archive with streaming - O(1) memory for content.
+
+        Reads file content on-demand during write, avoiding accumulation
+        of all file contents in memory. This allows processing repositories
+        of any size with bounded memory usage.
+        """
+        temp_file = None
+        try:
+            # Create temporary file in same directory as output
+            temp_file = tempfile.NamedTemporaryFile(
+                mode="wb" if compress else "w",
+                suffix=".tmp",
+                dir=output_path.parent,
+                delete=False,
+                encoding="utf-8" if not compress else None,
+            )
+            self._temp_files.append(temp_file.name)
+
+            # Write to temporary file first (atomic operation)
+            if compress:
+                with gzip.open(
+                    temp_file.name,
+                    "wt",
+                    encoding="utf-8",
+                    compresslevel=self.compression_level,
+                ) as f:
+                    await self._write_format_streaming(
+                        f, source_path, file_entries, format_type
+                    )
+            else:
+                with open(temp_file.name, "w", encoding="utf-8") as f:
+                    await self._write_format_streaming(
+                        f, source_path, file_entries, format_type
+                    )
+
+            # Atomic move to final location
+            shutil.move(temp_file.name, output_path)
+            self._temp_files.remove(temp_file.name)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error writing archive: {e}")
+            if temp_file and temp_file.name in self._temp_files:
+                try:
+                    os.unlink(temp_file.name)
+                    self._temp_files.remove(temp_file.name)
+                except OSError:
+                    pass
+            return False
+
+    async def _write_format_streaming(
+        self,
+        f,
+        source_path: Path,
+        file_entries: List[Tuple[FileMetadata, Path]],
+        format_type: str,
+    ):
+        """Dispatch to appropriate streaming format writer"""
+        if format_type == "xml":
+            await self._write_xml_streaming(f, source_path, file_entries)
+        elif format_type == "json":
+            await self._write_json_streaming(f, source_path, file_entries)
+        elif format_type == "markdown":
+            await self._write_markdown_streaming(f, source_path, file_entries)
+        elif format_type == "yaml":
+            await self._write_yaml_streaming(f, source_path, file_entries)
+        else:  # Default to txt format
+            await self._write_txt_streaming(f, source_path, file_entries)
+
+    def _read_content_for_entry(
+        self, metadata: FileMetadata, file_path: Path
+    ) -> Optional[bytes]:
+        """Read file content on-demand for streaming write"""
+        content = self._read_file_content(file_path, metadata)
+        return content
+
+    async def _write_txt_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write TXT archive with streaming - O(1) memory"""
+        # Write enhanced header
+        f.write("# Enhanced Combined Files Archive\n")
+        f.write(f"# Generated by file-combiner v{__version__}\n")
+        f.write(f"# Date: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+        f.write(f"# Source: {source_path}\n")
+        f.write(f"# Total files: {len(file_entries)}\n")
+        f.write(f"# Total size: {self._format_size(self.stats['bytes_processed'])}\n")
+        f.write("#\n")
+        f.write("# Format:\n")
+        f.write(f"# {self.SEPARATOR}\n")
+        f.write(f"# {self.METADATA_PREFIX} <json_metadata>\n")
+        f.write(f"# {self.ENCODING_PREFIX} <encoding_type>\n")
+        f.write("# <file_content>\n")
+        f.write("#\n\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"{self.SEPARATOR}\n")
+            f.write(f"{self.METADATA_PREFIX} {json.dumps(asdict(metadata))}\n")
+            f.write(f"{self.ENCODING_PREFIX} {metadata.encoding}\n")
+
+            if metadata.is_binary:
+                f.write(content.decode("ascii"))
+            else:
+                f.write(content.decode("utf-8"))
+
+            f.write("\n")
+            # Content goes out of scope here - memory freed
+
+    async def _write_xml_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write XML archive with streaming - O(1) memory per file"""
+        # Write XML header manually for streaming
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write(f'<file_archive version="{__version__}" ')
+        f.write(f'created="{time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}" ')
+        f.write(f'source="{source_path}" ')
+        f.write(f'total_files="{len(file_entries)}" ')
+        f.write(f'total_size="{self.stats["bytes_processed"]}">\n')
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            # Build file element with attributes
+            attrs = " ".join(
+                f'{k}="{self._xml_escape_attr(str(v))}"'
+                for k, v in asdict(metadata).items()
+                if v is not None
+            )
+            f.write(f"  <file {attrs}>")
+
+            if metadata.is_binary:
+                f.write(content.decode("ascii"))
+            else:
+                f.write(self._xml_escape_content(content.decode("utf-8")))
+
+            f.write("</file>\n")
+            # Content goes out of scope here - memory freed
+
+        f.write("</file_archive>")
+
+    def _xml_escape_attr(self, s: str) -> str:
+        """Escape string for XML attribute value"""
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    def _xml_escape_content(self, s: str) -> str:
+        """Escape string for XML element content"""
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    async def _write_json_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write JSON archive with streaming - uses incremental JSON building"""
+        # Write header
+        f.write("{\n")
+        f.write('  "metadata": {\n')
+        f.write(f'    "version": "{__version__}",\n')
+        f.write(
+            f'    "created": "{time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}",\n'
+        )
+        f.write(f'    "source": {json.dumps(str(source_path))},\n')
+        f.write(f'    "total_files": {len(file_entries)},\n')
+        f.write(f'    "total_size": {self.stats["bytes_processed"]}\n')
+        f.write("  },\n")
+        f.write('  "files": [\n')
+
+        # Stream files one at a time
+        first = True
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            if not first:
+                f.write(",\n")
+            first = False
+
+            file_data = asdict(metadata)
+            if metadata.is_binary:
+                file_data["content"] = content.decode("ascii")
+            else:
+                file_data["content"] = content.decode("utf-8")
+
+            # Write indented JSON for this file
+            file_json = json.dumps(file_data, indent=2, ensure_ascii=False)
+            # Indent each line
+            indented = "\n".join("    " + line for line in file_json.split("\n"))
+            f.write(indented)
+            # Content goes out of scope here - memory freed
+
+        f.write("\n  ]\n}")
+
+    async def _write_markdown_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write Markdown archive with streaming - O(1) memory per file"""
+        # Write header
+        f.write("# Combined Files Archive\n\n")
+        f.write(f"**Generated by:** file-combiner v{__version__}  \n")
+        f.write(
+            f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  \n"
+        )
+        f.write(f"**Source:** `{source_path}`  \n")
+        f.write(f"**Total files:** {len(file_entries)}  \n")
+        f.write(
+            f"**Total size:** {self._format_size(self.stats['bytes_processed'])}  \n\n"
+        )
+
+        # Table of contents (uses only metadata, not content)
+        f.write("## Table of Contents\n\n")
+        for i, (metadata, _) in enumerate(file_entries, 1):
+            anchor = metadata.path.replace("/", "").replace(".", "")
+            f.write(f"{i}. [{metadata.path}](#{anchor})\n")
+        f.write("\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"## {metadata.path}\n\n")
+            f.write(f"**Size:** {self._format_size(metadata.size)}  \n")
+            f.write(
+                f"**Modified:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.mtime))}  \n"
+            )
+            f.write(f"**Encoding:** {metadata.encoding}  \n")
+            f.write(f"**Binary:** {'Yes' if metadata.is_binary else 'No'}  \n\n")
+
+            if metadata.is_binary:
+                content_str = content.decode("ascii")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
+            else:
+                lang = self._detect_language(metadata.path)
+                content_str = content.decode("utf-8")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}{lang}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
+            # Content goes out of scope here - memory freed
+
+    async def _write_yaml_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write YAML archive with streaming - O(1) memory per file"""
+        # Write header
+        f.write("# Combined Files Archive\n")
+        f.write(f"version: {__version__}\n")
+        f.write(f"created: '{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}'\n")
+        f.write(f"source: '{source_path}'\n")
+        f.write(f"total_files: {len(file_entries)}\n")
+        f.write(f"total_size: {self.stats['bytes_processed']}\n\n")
+        f.write("files:\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"  - path: '{metadata.path}'\n")
+            f.write(f"    size: {metadata.size}\n")
+            f.write(f"    mtime: {metadata.mtime}\n")
+            f.write(f"    encoding: '{metadata.encoding}'\n")
+            f.write(f"    is_binary: {str(metadata.is_binary).lower()}\n")
+
+            if metadata.is_binary:
+                content_str = content.decode("ascii")
+            else:
+                content_str = content.decode("utf-8")
+
+            content_lines = content_str.split("\n")
+            f.write("    content: |\n")
+            for line in content_lines:
+                f.write(f"      {line}\n")
+            f.write("\n")
+            # Content goes out of scope here - memory freed
 
     async def _write_archive_content(
         self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
