@@ -55,7 +55,7 @@ except ImportError:
     tqdm = None
 
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 __author__ = "File Combiner Project"
 __license__ = "MIT"
 
@@ -94,6 +94,12 @@ class ArchiveHeader:
 
 class FileCombinerError(Exception):
     """Base exception for file combiner errors"""
+
+    pass
+
+
+class SecurityError(FileCombinerError):
+    """Security-related errors such as path traversal attempts"""
 
     pass
 
@@ -143,6 +149,9 @@ class FileCombiner:
         self.ignore_binary = self.config.get("ignore_binary", False)
         self.dry_run = self.config.get("dry_run", False)
         self.verbose = self.config.get("verbose", False)
+
+        # TTY detection for progress bars (disable in non-interactive terminals like CI/CD)
+        self.is_tty = sys.stdout.isatty()
 
         # Statistics
         self.stats = {
@@ -643,8 +652,12 @@ class FileCombiner:
                 }
 
                 # Collect results with progress bar
+                # Disable rich/tqdm progress bars in non-TTY environments (CI/CD)
+                use_rich_progress = progress and HAS_RICH and self.console and self.is_tty
+                use_tqdm_progress = progress and HAS_TQDM and tqdm and self.is_tty and not use_rich_progress
+
                 completed_count = 0
-                if progress and HAS_RICH and self.console:
+                if use_rich_progress:
                     with Progress(
                         SpinnerColumn(),
                         TextColumn("[progress.description]{task.description}"),
@@ -669,7 +682,7 @@ class FileCombiner:
                                 self.stats["errors"] += 1
 
                             progress_bar.update(task, advance=1)
-                elif progress and HAS_TQDM and tqdm:
+                elif use_tqdm_progress:
                     pbar = tqdm(
                         total=len(all_files), desc="Processing files", unit="files"
                     )
@@ -1111,15 +1124,19 @@ class FileCombiner:
             f.write(f"**Binary:** {'Yes' if metadata.is_binary else 'No'}  \n\n")
 
             if metadata.is_binary:
-                f.write("```\n")
-                f.write(content.decode("ascii"))
-                f.write("\n```\n\n")
+                content_str = content.decode("ascii")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
             else:
                 # Detect language for syntax highlighting
                 lang = self._detect_language(metadata.path)
-                f.write(f"```{lang}\n")
-                f.write(content.decode("utf-8"))
-                f.write("\n```\n\n")
+                content_str = content.decode("utf-8")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}{lang}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
 
     async def _write_yaml_format(
         self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
@@ -1152,6 +1169,65 @@ class FileCombiner:
             for line in content_lines:
                 f.write(f"      {line}\n")
             f.write("\n")
+
+    def _detect_input_format(self, input_path: Path) -> str:
+        """
+        Detect the format of an archive file for parsing.
+
+        Uses file extension and content inspection to determine format.
+        """
+        suffix = input_path.suffix.lower()
+
+        # Handle compressed files
+        if suffix == ".gz":
+            # Get the actual format from the inner extension
+            stem = input_path.stem
+            inner_suffix = Path(stem).suffix.lower()
+            suffix = inner_suffix if inner_suffix else suffix
+
+        format_map = {
+            ".json": "json",
+            ".xml": "xml",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".md": "markdown",
+            ".markdown": "markdown",
+            ".txt": "txt",
+        }
+
+        detected = format_map.get(suffix, "txt")
+
+        # For ambiguous cases, try to inspect content
+        if detected == "txt":
+            try:
+                # Read first few bytes to detect format
+                with open(input_path, "rb") as f:
+                    magic = f.read(2)
+                    # Check for gzip
+                    if magic == b"\x1f\x8b":
+                        import gzip
+
+                        with gzip.open(input_path, "rt", encoding="utf-8") as gf:
+                            first_chars = gf.read(100).strip()
+                    else:
+                        f.seek(0)
+                        first_chars = f.read(100).decode("utf-8", errors="ignore").strip()
+
+                # Detect by content
+                if first_chars.startswith("{"):
+                    detected = "json"
+                elif first_chars.startswith("<?xml") or first_chars.startswith("<file_archive"):
+                    detected = "xml"
+                elif first_chars.startswith("# Combined Files Archive") and "```" in first_chars:
+                    detected = "markdown"
+                elif first_chars.startswith("# Combined Files Archive") or (
+                    first_chars.startswith("version:") and "files:" in first_chars
+                ):
+                    detected = "yaml"
+            except Exception:
+                pass  # Fall back to txt format
+
+        return detected
 
     def _detect_language(self, file_path: str) -> str:
         """Detect programming language from file extension for syntax highlighting"""
@@ -1233,7 +1309,10 @@ class FileCombiner:
                     f"Cannot write to output directory: {output_path}"
                 )
 
+            # Detect archive format
+            detected_format = self._detect_input_format(input_path)
             self.logger.info(f"Splitting archive: {input_path}")
+            self.logger.info(f"Detected format: {detected_format}")
             self.logger.info(f"Output directory: {output_path}")
             if is_compressed:
                 self.logger.info("Detected compressed archive")
@@ -1243,9 +1322,17 @@ class FileCombiner:
                 mode = "rt" if is_compressed else "r"
 
                 with open_func(input_path, mode, encoding="utf-8") as f:
-                    files_restored = await self._parse_and_restore_files(
-                        f, output_path, progress
-                    )
+                    # Dispatch to format-specific parser
+                    if detected_format == "json":
+                        files_restored = await self._parse_json_archive(f, output_path, progress)
+                    elif detected_format == "xml":
+                        files_restored = await self._parse_xml_archive(f, output_path, progress)
+                    elif detected_format == "yaml":
+                        files_restored = await self._parse_yaml_archive(f, output_path, progress)
+                    elif detected_format == "markdown":
+                        files_restored = await self._parse_markdown_archive(f, output_path, progress)
+                    else:  # Default to txt format
+                        files_restored = await self._parse_and_restore_files(f, output_path, progress)
 
                 self.logger.info(
                     f"Successfully split {files_restored} files to: {output_path}"
@@ -1258,9 +1345,17 @@ class FileCombiner:
                     self.logger.info("Trying to read as uncompressed...")
                     # Retry as uncompressed
                     with open(input_path, "r", encoding="utf-8") as f:
-                        files_restored = await self._parse_and_restore_files(
-                            f, output_path, progress
-                        )
+                        # Dispatch to format-specific parser
+                        if detected_format == "json":
+                            files_restored = await self._parse_json_archive(f, output_path, progress)
+                        elif detected_format == "xml":
+                            files_restored = await self._parse_xml_archive(f, output_path, progress)
+                        elif detected_format == "yaml":
+                            files_restored = await self._parse_yaml_archive(f, output_path, progress)
+                        elif detected_format == "markdown":
+                            files_restored = await self._parse_markdown_archive(f, output_path, progress)
+                        else:
+                            files_restored = await self._parse_and_restore_files(f, output_path, progress)
                     self.logger.info(
                         f"Successfully split {files_restored} files (uncompressed)"
                     )
@@ -1423,12 +1518,428 @@ class FileCombiner:
 
         return files_restored
 
+    async def _parse_json_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse JSON format archive and restore files"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            data = json.loads(content)
+
+            if "files" not in data:
+                self.logger.error("Invalid JSON archive: missing 'files' key")
+                return 0
+
+            files_list = data["files"]
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": file_data.get("ends_with_newline", True),
+                            "mode": file_data.get("mode", 0o644),
+                            "mtime": file_data.get("mtime", time.time()),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+                        content = file_data.get("content", "")
+
+                        # Convert content to lines for _restore_file
+                        content_lines = content.split("\n") if content else []
+
+                        await self._restore_file(output_path, metadata, encoding, content_lines)
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_xml_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse XML format archive and restore files"""
+        import xml.etree.ElementTree as ET
+
+        files_restored = 0
+
+        try:
+            content = f.read()
+            root = ET.fromstring(content)
+
+            files_list = root.findall("file")
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_elem in files_list:
+                    try:
+                        metadata = {
+                            "path": file_elem.get("path", ""),
+                            "is_binary": file_elem.get("is_binary", "false").lower() == "true",
+                            "ends_with_newline": file_elem.get("ends_with_newline", "true").lower() == "true",
+                            "mode": int(file_elem.get("mode", "33188")),  # 0o644 in decimal
+                            "mtime": float(file_elem.get("mtime", str(time.time()))),
+                        }
+                        encoding = file_elem.get("encoding", "utf-8")
+                        content = file_elem.text or ""
+
+                        # Convert content to lines for _restore_file
+                        content_lines = content.split("\n") if content else []
+
+                        await self._restore_file(output_path, metadata, encoding, content_lines)
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_elem.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except ET.ParseError as e:
+            self.logger.error(f"Invalid XML archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_yaml_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse YAML format archive and restore files (simple parser, no PyYAML required)"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            lines = content.split("\n")
+
+            # Simple YAML parser for our specific format
+            files_list = []
+            current_file = None
+            in_content = False
+            content_lines = []
+
+            for line in lines:
+                if line.startswith("  - path:"):
+                    # Save previous file
+                    if current_file is not None:
+                        current_file["content_lines"] = content_lines
+                        files_list.append(current_file)
+                    # Start new file
+                    path_value = line.split(":", 1)[1].strip().strip("'\"")
+                    current_file = {"path": path_value}
+                    content_lines = []
+                    in_content = False
+                elif current_file is not None:
+                    if line.startswith("    content: |"):
+                        in_content = True
+                    elif in_content:
+                        if line.startswith("      "):
+                            content_lines.append(line[6:])  # Remove 6-space indent
+                        elif line.strip() == "" and content_lines:
+                            content_lines.append("")  # Preserve empty lines in content
+                        else:
+                            in_content = False
+                    elif line.startswith("    size:"):
+                        current_file["size"] = int(line.split(":", 1)[1].strip())
+                    elif line.startswith("    mtime:"):
+                        current_file["mtime"] = float(line.split(":", 1)[1].strip())
+                    elif line.startswith("    encoding:"):
+                        current_file["encoding"] = line.split(":", 1)[1].strip().strip("'\"")
+                    elif line.startswith("    is_binary:"):
+                        current_file["is_binary"] = line.split(":", 1)[1].strip().lower() == "true"
+
+            # Don't forget the last file
+            if current_file is not None:
+                current_file["content_lines"] = content_lines
+                files_list.append(current_file)
+
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": True,  # YAML format always has trailing newlines
+                            "mode": file_data.get("mode", 0o644),
+                            "mtime": file_data.get("mtime", time.time()),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+
+                        await self._restore_file(
+                            output_path, metadata, encoding, file_data.get("content_lines", [])
+                        )
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except Exception as e:
+            self.logger.error(f"Error parsing YAML archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_markdown_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse Markdown format archive and restore files"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            lines = content.split("\n")
+
+            # Parse markdown format
+            files_list = []
+            current_file = None
+            in_code_block = False
+            code_fence = None
+            content_lines = []
+            current_encoding = "utf-8"
+            current_is_binary = False
+
+            for line in lines:
+                # Detect file header (## path/to/file.ext)
+                if line.startswith("## ") and not in_code_block:
+                    # Save previous file
+                    if current_file is not None:
+                        current_file["content_lines"] = content_lines
+                        current_file["encoding"] = current_encoding
+                        current_file["is_binary"] = current_is_binary
+                        files_list.append(current_file)
+
+                    # Start new file
+                    file_path = line[3:].strip()
+                    # Skip table of contents section
+                    if file_path == "Table of Contents":
+                        current_file = None
+                        continue
+                    current_file = {"path": file_path}
+                    content_lines = []
+                    in_code_block = False
+                    code_fence = None
+                    current_encoding = "utf-8"
+                    current_is_binary = False
+                elif current_file is not None:
+                    # Parse metadata
+                    if line.startswith("**Encoding:**"):
+                        enc = line.split(":", 1)[1].strip().rstrip("  ")
+                        current_encoding = enc if enc else "utf-8"
+                    elif line.startswith("**Binary:**"):
+                        current_is_binary = "Yes" in line
+
+                    # Detect code fence start
+                    if not in_code_block and line.startswith("```"):
+                        in_code_block = True
+                        code_fence = line.rstrip()
+                        # Extract just the backticks part for matching
+                        fence_match = ""
+                        for c in code_fence:
+                            if c == "`":
+                                fence_match += c
+                            else:
+                                break
+                        code_fence = fence_match
+                        continue
+
+                    # Detect code fence end
+                    if in_code_block and line.rstrip() == code_fence:
+                        in_code_block = False
+                        code_fence = None
+                        continue
+
+                    # Collect content within code block
+                    if in_code_block:
+                        content_lines.append(line)
+
+            # Don't forget the last file
+            if current_file is not None:
+                current_file["content_lines"] = content_lines
+                current_file["encoding"] = current_encoding
+                current_file["is_binary"] = current_is_binary
+                files_list.append(current_file)
+
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": True,
+                            "mode": 0o644,
+                            "mtime": time.time(),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+
+                        await self._restore_file(
+                            output_path, metadata, encoding, file_data.get("content_lines", [])
+                        )
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except Exception as e:
+            self.logger.error(f"Error parsing Markdown archive: {e}")
+            return 0
+
+        return files_restored
+
     async def _restore_file(
         self, output_path: Path, metadata: dict, encoding: str, content_lines: List[str]
     ):
         """Restore individual file with proper content reconstruction"""
         try:
-            file_path = output_path / metadata["path"]
+            # SECURITY: Sanitize path to prevent path traversal attacks
+            file_path = self._sanitize_path(output_path, metadata["path"])
 
             # Ensure parent directories exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1485,6 +1996,84 @@ class FileCombiner:
                 f"Error restoring file {metadata.get('path', 'unknown')}: {e}"
             )
             raise
+
+    def _sanitize_path(self, base_dir: Path, unsafe_relative_path: str) -> Path:
+        """
+        Sanitize and validate extraction path to prevent path traversal attacks.
+
+        This prevents malicious archives from writing files outside the output directory
+        via paths like "../../../etc/passwd" or absolute paths.
+
+        Args:
+            base_dir: The base output directory (must be absolute)
+            unsafe_relative_path: The potentially malicious relative path from archive
+
+        Returns:
+            Safe absolute path within base_dir
+
+        Raises:
+            SecurityError: If the path would escape the base directory
+        """
+        # Resolve base_dir to absolute path
+        base_dir = base_dir.resolve()
+
+        # Normalize the unsafe path: remove leading slashes, handle backslashes
+        normalized_path = unsafe_relative_path.replace("\\", "/")
+        normalized_path = normalized_path.lstrip("/")
+
+        # Remove any null bytes (potential injection)
+        if "\x00" in normalized_path:
+            raise SecurityError(
+                f"Path contains null bytes (potential injection): {repr(unsafe_relative_path)}"
+            )
+
+        # Construct the target path and resolve it
+        target_path = (base_dir / normalized_path).resolve()
+
+        # Verify the resolved path is within base_dir
+        try:
+            target_path.relative_to(base_dir)
+        except ValueError:
+            raise SecurityError(
+                f"Path traversal attempt detected: '{unsafe_relative_path}' "
+                f"would escape output directory '{base_dir}'"
+            )
+
+        return target_path
+
+    def _get_safe_fence(self, content: str, base_fence: str = "```") -> str:
+        """
+        Calculate a safe code fence that won't be broken by content.
+
+        If content contains backtick sequences, returns a longer fence.
+        For example, if content has ``` inside, returns ```` instead.
+
+        Args:
+            content: The content to be wrapped in code fence
+            base_fence: The base fence string (default: ```)
+
+        Returns:
+            A fence string that is safe to use with this content
+        """
+        fence = base_fence
+        backtick_char = "`"
+
+        # Find the longest sequence of backticks in content
+        max_backticks = 0
+        current_count = 0
+
+        for char in content:
+            if char == backtick_char:
+                current_count += 1
+                max_backticks = max(max_backticks, current_count)
+            else:
+                current_count = 0
+
+        # If content has backtick sequences >= our fence, make fence longer
+        if max_backticks >= len(fence):
+            fence = backtick_char * (max_backticks + 1)
+
+        return fence
 
     def _cleanup_temp_files(self):
         """Clean up any temporary files and directories"""

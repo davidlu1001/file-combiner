@@ -4,7 +4,7 @@ build-backend = "pdm.backend"
 
 [project]
 name = "file-combiner"
-version = "2.0.1"
+version = "2.1.0"
 description = "High-performance file combiner for large repositories and AI agents"
 authors = [
     {name = "File Combiner Project", email = "info@file-combiner.dev"},
