@@ -1,21 +1,22 @@
 [build-system]
-requires = ["pdm-backend"]
-build-backend = "pdm.backend"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "file-combiner"
-version = "2.0.1"
+version = "2.1.0"
 description = "High-performance file combiner for large repositories and AI agents"
 authors = [
     {name = "File Combiner Project", email = "info@file-combiner.dev"},
 ]
 dependencies = [
     "rich>=13.0.0",
+    "pathspec>=0.11.0",
 ]
 requires-python = ">=3.8"
 readme = "README.md"
 license = {text = "MIT"}
-keywords = ["file", "combiner", "archive", "ai", "tools"]
+keywords = ["file", "combiner", "archive", "ai", "tools", "codebase", "llm"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
@@ -27,13 +28,15 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Tools",
+    "Topic :: Software Development :: Build Tools",
     "Topic :: System :: Archiving",
+    "Topic :: Utilities",
 ]
 
 [project.urls]
 Homepage = "https://github.com/davidlu1001/file-combiner"
 Repository = "https://github.com/davidlu1001/file-combiner"
+Documentation = "https://github.com/davidlu1001/file-combiner#readme"
 "Bug Reports" = "https://github.com/davidlu1001/file-combiner/issues"
 
 [project.scripts]
@@ -42,22 +45,65 @@ file-combiner = "file_combiner:cli_main"
 [project.optional-dependencies]
 progress = ["tqdm>=4.60.0"]
 dev = [
-    "pytest>=6.0.0",
+    "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
-    "black>=22.0.0",
-    "flake8>=4.0.0",
-    "mypy>=0.950",
-    "pytest-cov>=3.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
 ]
 full = ["tqdm>=4.60.0"]
 
-[tool.black]
-line-length = 88
-target-version = ['py38']
+[tool.hatch.build.targets.wheel]
+only-include = ["file_combiner.py"]
 
-[tool.isort]
-profile = "black"
-line_length = 88
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "file_combiner.py",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+# Ruff configuration (replaces black, isort, flake8)
+[tool.ruff]
+target-version = "py38"
+line-length = 88
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    "dist",
+    "build",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "C901",   # too complex
+    "SIM108", # ternary operator
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["file_combiner"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -65,6 +111,20 @@ addopts = "-v --tb=short"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 
-[tool.flake8]
-max-line-length = 88
-extend-ignore = ["E203", "W503"]
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

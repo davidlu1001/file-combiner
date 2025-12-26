@@ -6,22 +6,26 @@
 
 A high-performance file combiner that merges entire directories into single files and restores them back to their original structure. Features **multi-format output** (TXT, XML, JSON, Markdown, YAML) with intelligent auto-detection. Optimized for AI agents (Claude, ChatGPT, Copilot) and perfect for large codebases.
 
-## ✨ Features
+## Features
 
-- 🎨 **Multi-Format Output**: TXT, XML, JSON, Markdown, YAML with auto-detection
-- 🚀 **High Performance**: Parallel processing with async I/O
-- 🔄 **Bidirectional**: Combine ↔ Split operations with perfect fidelity
-- 🗜️ **Smart Compression**: Optional gzip compression
-- 🤖 **AI-Optimized**: Perfect format for AI agents with syntax highlighting
-- 📁 **Deep Recursion**: Handles nested directories
-- 🔧 **Universal Support**: Text, binary, and Unicode files
-- ⚡ **Advanced Filtering**: Powerful include/exclude patterns
-- 🌐 **GitHub Integration**: Direct repository cloning and combining
-- 📊 **Progress Tracking**: Beautiful progress bars with rich terminal output
-- 🎯 **Cross-Platform**: Linux, macOS, Windows
-- 🛡️ **Robust**: Comprehensive error handling and validation
+- **Multi-Format Output**: TXT, XML, JSON, Markdown, YAML with auto-detection
+- **Multi-Format Split**: Restore from any format (symmetric combine/split)
+- **High Performance**: Parallel processing with async I/O
+- **Memory Efficient**: Streaming architecture with O(1) memory for content
+- **Bidirectional**: Combine and Split operations with perfect fidelity
+- **Smart Compression**: Optional gzip compression
+- **AI-Optimized**: Perfect format for AI agents with syntax highlighting
+- **Gitignore Aware**: Automatically respects `.gitignore` patterns
+- **Security Hardened**: Path traversal protection, null byte injection prevention
+- **Deep Recursion**: Handles nested directories
+- **Universal Support**: Text, binary, and Unicode files
+- **Advanced Filtering**: Powerful include/exclude patterns
+- **GitHub Integration**: Direct repository cloning and combining
+- **Progress Tracking**: Beautiful progress bars with rich terminal output
+- **Cross-Platform**: Linux, macOS, Windows
+- **Robust**: Comprehensive error handling and graceful signal handling
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Installation
 
@@ -32,45 +36,50 @@ pip install file-combiner
 # With all optional dependencies
 pip install file-combiner[full]
 
-# Development installation (using PDM)
+# Development installation (using uv - recommended)
 git clone https://github.com/davidlu1001/file-combiner.git
 cd file-combiner
-pdm install -G dev
+uv sync --all-extras
+
+# Alternative: using pip
+pip install -e ".[dev]"
 ```
 
 ### Basic Usage
 
 ```bash
-# Combine current directory into a single file (excludes Python cache folders)
-file-combiner combine . my-project.txt \
-  --exclude "__pycache__/**" --exclude "__pypackages__/**"
+# Combine current directory into a single file
+# Automatically respects .gitignore patterns
+file-combiner combine . my-project.txt
 
 # Multi-format output with auto-detection
-file-combiner combine . project.json    # → JSON format (auto-detected)
-file-combiner combine . project.xml     # → XML format (auto-detected)
-file-combiner combine . project.md      # → Markdown format (auto-detected)
-file-combiner combine . project.yaml    # → YAML format (auto-detected)
+file-combiner combine . project.json    # JSON format (auto-detected)
+file-combiner combine . project.xml     # XML format (auto-detected)
+file-combiner combine . project.md      # Markdown format (auto-detected)
+file-combiner combine . project.yaml    # YAML format (auto-detected)
+
+# Split archive back to original structure (works with ALL formats)
+file-combiner split combined.json ./restored-project
+file-combiner split combined.xml ./restored-project
+file-combiner split combined.md ./restored-project
 
 # Manual format override
-file-combiner combine . report.txt --format markdown  # → Markdown in .txt file
+file-combiner combine . report.txt --format markdown
 
 # Combine a GitHub repository directly
-file-combiner combine https://github.com/davidlu1001/file-combiner repo-archive.txt \
-  --exclude "__pycache__/**" --exclude ".git/**"
+file-combiner combine https://github.com/user/repo repo-archive.txt
+
+# Include files that would normally be gitignored
+file-combiner combine . output.txt --no-gitignore
 
 # Combine with compression (works with all formats)
-file-combiner combine /path/to/repo combined.json.gz --compress \
-  --exclude "__pycache__/**" --exclude "*.pyc"
-
-# Split archive back to original structure
-file-combiner split combined.txt.gz ./restored-project
+file-combiner combine /path/to/repo combined.json.gz --compress
 
 # Dry run to preview what would be combined
-file-combiner combine . output.txt --dry-run --verbose \
-  --exclude "__pycache__/**" --exclude "__pypackages__/**"
+file-combiner combine . output.txt --dry-run --verbose
 ```
 
-## 📖 Advanced Examples
+## Advanced Examples
 
 ### GitHub Repository Support
 
@@ -80,28 +89,21 @@ file-combiner combine https://github.com/user/repo combined-repo.txt
 
 # With smart exclusions for clean output
 file-combiner combine https://github.com/davidlu1001/file-combiner repo.txt \
-  --exclude "__pycache__/**" --exclude ".git/**" \
-  --exclude "*.pyc" --exclude ".pytest_cache/**" \
-  --exclude "__pypackages__/**" --exclude ".pdm-build/**"
+  --exclude "__pycache__/**" --exclude ".git/**"
 
 # Compress large repositories
 file-combiner combine https://github.com/user/large-repo repo.txt.gz --compress
 ```
 
-**Requirements for GitHub support:**
-- Git must be installed and available in PATH
-- Repository must be publicly accessible (or you must have access)
-- Temporary directory space for cloning
-
 ### AI-Optimized Combining
 
 ```bash
-# Perfect for sharing with AI agents (excludes common cache/build folders)
-file-combiner combine . for-ai.txt \
-  --exclude "node_modules/**" --exclude ".git/**" \
-  --exclude "__pycache__/**" --exclude "__pypackages__/**" \
-  --exclude "*.pyc" --exclude ".pytest_cache/**" \
-  --max-size 5M
+# Perfect for sharing with AI agents
+# Automatically excludes gitignored files
+file-combiner combine . for-ai.txt --max-size 5M
+
+# Markdown format with syntax highlighting (recommended for AI)
+file-combiner combine . ai-training.md
 ```
 
 ### Language-Specific Filtering
@@ -112,75 +114,9 @@ file-combiner combine src/ review.txt.gz \
   --include "*.py" --include "*.js" --compress
 ```
 
-### Automated Backups
-
-```bash
-# Create timestamped backups
-file-combiner combine ~/project backup-$(date +%Y%m%d).txt.gz \
-  --compress --verbose --exclude "*.log"
-```
-
-## 🎨 Multi-Format Output
+## Multi-Format Output
 
 File-combiner supports 5 output formats, each optimized for different use cases:
-
-### 📄 **TXT Format** (Default)
-Traditional plain text format with enhanced headers and metadata.
-```bash
-file-combiner combine . output.txt
-# Auto-detected from .txt extension
-```
-
-### 🏷️ **XML Format**
-Structured XML with metadata attributes, perfect for enterprise workflows.
-```bash
-file-combiner combine . output.xml
-# Auto-detected from .xml extension
-```
-
-### 📋 **JSON Format**
-Structured JSON ideal for APIs and programmatic processing.
-```bash
-file-combiner combine . output.json
-# Auto-detected from .json extension
-```
-
-### 📝 **Markdown Format**
-Beautiful formatted output with syntax highlighting and table of contents.
-```bash
-file-combiner combine . output.md
-# Auto-detected from .md/.markdown extension
-```
-
-### ⚙️ **YAML Format**
-Human-readable configuration-style format.
-```bash
-file-combiner combine . output.yaml
-# Auto-detected from .yaml/.yml extension
-```
-
-### 🎯 **Format Selection**
-
-**Auto-Detection** (Recommended):
-```bash
-file-combiner combine . project.json    # → JSON format
-file-combiner combine . project.xml     # → XML format
-file-combiner combine . project.md      # → Markdown format
-```
-
-**Manual Override**:
-```bash
-file-combiner combine . data.txt --format json     # JSON in .txt file
-file-combiner combine . report.xml --format markdown  # Markdown in .xml file
-```
-
-**With Compression** (All formats supported):
-```bash
-file-combiner combine . archive.json.gz --compress
-file-combiner combine . docs.md.gz --format markdown --compress
-```
-
-### 🎨 **Format Comparison**
 
 | Format       | Best For                              | Features                   | Size   |
 | ------------ | ------------------------------------- | -------------------------- | ------ |
@@ -190,21 +126,43 @@ file-combiner combine . docs.md.gz --format markdown --compress
 | **Markdown** | Documentation, AI training            | Syntax highlighting, TOC   | Medium |
 | **YAML**     | Configuration, human-readable         | Clean format, hierarchical | Small  |
 
-### 🤖 **AI-Optimized Formats**
+### Format Selection
 
-For AI agents and code analysis:
+**Auto-Detection** (Recommended):
 ```bash
-# Markdown with syntax highlighting (recommended for AI)
-file-combiner combine . ai-training.md --exclude "__pycache__/**"
-
-# JSON for programmatic processing
-file-combiner combine . data-analysis.json --exclude "node_modules/**"
-
-# YAML for configuration-style output
-file-combiner combine . config-review.yaml --exclude ".git/**"
+file-combiner combine . project.json    # JSON format
+file-combiner combine . project.xml     # XML format
+file-combiner combine . project.md      # Markdown format
 ```
 
-## ⚙️ Configuration
+**Manual Override**:
+```bash
+file-combiner combine . data.txt --format json
+```
+
+## New in v2.1.0
+
+### Streaming Architecture
+- **O(1) Memory for Content**: Process repositories of any size with bounded memory
+- **Two-Phase Pipeline**: Parallel metadata collection, streaming content write
+- **No Memory Bomb**: 10GB repo uses ~20MB RAM instead of 10GB+
+
+### Security Hardening
+- **Path Traversal Protection**: Prevents malicious archives from writing outside target directory
+- **Null Byte Injection Prevention**: Blocks path injection attacks
+- **Markdown Fence Safety**: Dynamic code fence calculation prevents injection
+
+### Format Symmetry
+- **Multi-Format Split**: Restore from JSON, XML, YAML, Markdown (not just TXT)
+- **Format Auto-Detection**: Automatically detects archive format for split operations
+
+### Developer Experience
+- **Gitignore Awareness**: Automatically respects `.gitignore` patterns
+- **Fuzzy Command Matching**: Suggests corrections for typos (`combin` → `combine`)
+- **TTY Detection**: Disables progress bars in CI/CD environments
+- **Signal Handling**: Graceful cleanup on Ctrl+C
+
+## Configuration
 
 Create `~/.config/file-combiner/config`:
 
@@ -212,96 +170,91 @@ Create `~/.config/file-combiner/config`:
 max_file_size = "50M"
 max_workers = 8
 verbose = false
+respect_gitignore = true
 exclude_patterns = [
     "node_modules/**/*",
     "__pycache__/**/*",
-    "__pypackages__/**/*",
-    "*.pyc",
-    ".pytest_cache/**/*",
     ".git/**/*",
-    ".venv/**/*",
-    "venv/**/*"
-]
-include_patterns = [
-    "*.py",
-    "*.js",
-    "*.md"
+    ".venv/**/*"
 ]
 ```
 
-## 🚀 Performance
+## Performance
 
+### Speed
 - **Small projects** (<100 files): ~0.1s
 - **Medium projects** (1000 files): ~2-5s
 - **Large repositories** (10k+ files): ~30-60s
 - **Parallel processing**: 4-8x speedup on multi-core systems
 
-## 🧪 Development
+### Memory Usage
+| Repository Size | Files | Peak RAM |
+|-----------------|-------|----------|
+| Small | 100 | ~10MB |
+| Medium | 10,000 | ~15MB |
+| Large | 50,000 | ~20MB |
+| Massive | 100,000+ | ~25MB |
+
+Memory usage stays flat regardless of total content size due to streaming architecture.
+
+## Development
 
 ```bash
-# Install PDM (if not already installed)
-pip install pdm
+# Install uv (if not already installed)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install project and development dependencies
-pdm install -G dev
+# Clone and setup
+git clone https://github.com/davidlu1001/file-combiner.git
+cd file-combiner
+uv sync --all-extras
 
 # Run tests
-pdm run pytest
+uv run pytest
 
-# Format code
-pdm run black file_combiner.py
+# Format code (using ruff)
+uv run ruff format .
 
-# Lint code
-pdm run flake8 file_combiner.py
+# Lint code (using ruff)
+uv run ruff check .
 
 # Type checking
-pdm run mypy file_combiner.py
+uv run mypy file_combiner.py
 
 # Run tests with coverage
-pdm run pytest --cov=file_combiner
-
-# Demo multi-format output
-make multi-format-demo
+uv run pytest --cov=file_combiner
 ```
 
-## 🎉 Recent Updates (v2.0.2)
+## CLI Reference
 
-### ✨ New Features
-- 🎨 **Multi-Format Output** - TXT, XML, JSON, Markdown, YAML with intelligent auto-detection
-- 🎯 **Smart Language Detection** - 40+ programming languages with syntax highlighting
-- 📝 **Enhanced Markdown Format** - Table of contents, syntax highlighting, rich metadata
-- 🔧 **Format Auto-Detection** - Automatically detects format from file extension
-- 🗜️ **Universal Compression** - All formats work seamlessly with gzip compression
-- ✅ **GitHub URL support** - Clone and combine repositories directly from GitHub URLs
-- ✅ **Rich terminal output** with beautiful colored progress bars and formatting
-- ✅ **PDM dependency management** for modern Python project workflow
-- ✅ **Smart Python exclusions** - Automatically exclude `__pycache__`, `__pypackages__`, etc.
-- ✅ Enhanced UI with spinners, colored checkmarks, and time tracking
+```
+file-combiner <operation> <input_path> <output_path> [options]
 
-### 🐛 Bug Fixes
-- ✅ Fixed negative `max_workers` validation causing crashes
-- ✅ Fixed `_temp_files` initialization issues in constructor
-- ✅ Fixed content parsing for files starting with `#` characters
-- ✅ Fixed missing `io` module import for error handling
-- ✅ Fixed version mismatch between setup.py and file_combiner.py
-- ✅ Fixed console script entry point for proper CLI execution
+Operations:
+  combine    Merge directory into single file
+  split      Restore archive to directory structure
 
-### 🚀 Improvements
-- ✅ Improved trailing newline preservation in file restoration
-- ✅ Enhanced error handling and robustness throughout codebase
-- ✅ Migrated from pip/setuptools to PDM for better dependency management
-- ✅ Updated comprehensive .gitignore for modern Python projects
-- ✅ Updated development workflow and documentation
+Options:
+  -c, --compress           Enable gzip compression
+  -v, --verbose            Enable verbose output
+  -n, --dry-run            Preview without making changes
+  --format FORMAT          Output format (txt, xml, json, markdown, yaml)
+  --exclude PATTERN        Exclude files matching pattern
+  --include PATTERN        Include only files matching pattern
+  --max-size SIZE          Maximum file size (e.g., 10M, 1G)
+  --no-gitignore           Ignore .gitignore patterns
+  --no-progress            Disable progress bars
+  --jobs N                 Number of parallel workers
+```
 
-### Known Limitations
+## Known Limitations
 
-- **Line endings**: Windows line endings (`\r\n`) are converted to Unix line endings (`\n`) during processing (documented behavior)
+- **Line endings**: Windows line endings (`\r\n`) are converted to Unix line endings (`\n`) during processing
 
-## 📄 License
+## License
 
 MIT License - see LICENSE file for details.
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create feature branch (`git checkout -b feature/amazing-feature`)
@@ -312,4 +265,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-**⭐ Star this repo if you find it useful!**
+**Star this repo if you find it useful!**

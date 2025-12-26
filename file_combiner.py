@@ -7,6 +7,7 @@ High-performance file combiner optimized for large repositories and AI agents
 import argparse
 import asyncio
 import base64
+import difflib
 import gzip
 import hashlib
 import io
@@ -15,6 +16,7 @@ import mimetypes
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -28,6 +30,14 @@ from pathlib import Path
 from typing import List, Dict, Optional, Union, Tuple
 import fnmatch
 import logging
+
+# Optional pathspec for gitignore support
+try:
+    import pathspec
+    HAS_PATHSPEC = True
+except ImportError:
+    HAS_PATHSPEC = False
+    pathspec = None
 
 try:
     from rich.console import Console
@@ -55,7 +65,7 @@ except ImportError:
     tqdm = None
 
 
-__version__ = "2.0.1"
+__version__ = "2.1.0"
 __author__ = "File Combiner Project"
 __license__ = "MIT"
 
@@ -94,6 +104,12 @@ class ArchiveHeader:
 
 class FileCombinerError(Exception):
     """Base exception for file combiner errors"""
+
+    pass
+
+
+class SecurityError(FileCombinerError):
+    """Security-related errors such as path traversal attempts"""
 
     pass
 
@@ -144,6 +160,16 @@ class FileCombiner:
         self.dry_run = self.config.get("dry_run", False)
         self.verbose = self.config.get("verbose", False)
 
+        # TTY detection for progress bars (disable in non-interactive terminals like CI/CD)
+        self.is_tty = sys.stdout.isatty()
+
+        # Gitignore support
+        self.respect_gitignore = self.config.get("respect_gitignore", True)
+        self._gitignore_spec = None
+
+        # Signal handling for graceful cleanup
+        self._setup_signal_handlers()
+
         # Statistics
         self.stats = {
             "files_processed": 0,
@@ -170,6 +196,59 @@ class FileCombiner:
             logger.addHandler(handler)
 
         return logger
+
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful cleanup on interruption"""
+        def signal_handler(signum, frame):
+            """Handle interrupt signals gracefully"""
+            self.logger.warning("Received interrupt signal, cleaning up...")
+            self._cleanup_temp_files()
+            sys.exit(130)  # 128 + SIGINT (2)
+
+        # Only setup handlers for signals available on current platform
+        try:
+            signal.signal(signal.SIGINT, signal_handler)
+            signal.signal(signal.SIGTERM, signal_handler)
+        except (ValueError, OSError):
+            # Signal handling may not be available in all contexts (e.g., threads)
+            pass
+
+    def _load_gitignore(self, source_path: Path) -> None:
+        """Load and parse .gitignore file from source directory"""
+        if not self.respect_gitignore or not HAS_PATHSPEC:
+            return
+
+        gitignore_path = source_path / ".gitignore"
+        if not gitignore_path.exists():
+            return
+
+        try:
+            with open(gitignore_path, "r", encoding="utf-8") as f:
+                gitignore_content = f.read()
+
+            # Parse gitignore patterns
+            self._gitignore_spec = pathspec.PathSpec.from_lines(
+                pathspec.patterns.GitWildMatchPattern,
+                gitignore_content.splitlines()
+            )
+
+            if self.verbose:
+                self.logger.debug(f"Loaded .gitignore from {gitignore_path}")
+
+        except Exception as e:
+            if self.verbose:
+                self.logger.warning(f"Failed to parse .gitignore: {e}")
+            self._gitignore_spec = None
+
+    def _matches_gitignore(self, relative_path: str) -> bool:
+        """Check if path matches gitignore patterns"""
+        if self._gitignore_spec is None:
+            return False
+
+        try:
+            return self._gitignore_spec.match_file(relative_path)
+        except Exception:
+            return False
 
     def _is_github_url(self, url_or_path: str) -> bool:
         """Check if the input is a GitHub URL"""
@@ -380,6 +459,10 @@ class FileCombiner:
             # Check file size
             if file_stat.st_size > self.max_file_size:
                 return True, f"too large ({self._format_size(file_stat.st_size)})"
+
+            # Check gitignore patterns first (most common exclusion source)
+            if self._matches_gitignore(relative_path):
+                return True, "matches .gitignore pattern"
 
             # Check exclude patterns
             if self._matches_pattern(relative_path, self.exclude_patterns):
@@ -620,6 +703,12 @@ class FileCombiner:
                 "errors": 0,
             }
 
+            # Load .gitignore if present and enabled
+            if self.respect_gitignore:
+                self._load_gitignore(source_path)
+                if self._gitignore_spec and self.verbose:
+                    self.logger.info("Respecting .gitignore patterns")
+
             # Scan files
             self.logger.info(f"Scanning source directory: {source_path}")
             all_files = self._scan_directory(source_path)
@@ -631,20 +720,26 @@ class FileCombiner:
             if self.dry_run:
                 return self._dry_run_combine(all_files, source_path)
 
-            # Process files in parallel with progress tracking
-            processed_files = []
+            # Phase 1: Collect metadata in parallel (memory-efficient)
+            # Only stores (metadata, file_path) tuples - NOT file content
+            # This keeps memory usage O(n) for metadata but O(1) for content
+            file_entries: List[Tuple[FileMetadata, Path]] = []
 
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_file = {
                     executor.submit(
-                        self._process_file_worker, file_path, source_path
+                        self._collect_file_metadata, file_path, source_path
                     ): file_path
                     for file_path in all_files
                 }
 
-                # Collect results with progress bar
+                # Collect metadata with progress bar
+                # Disable rich/tqdm progress bars in non-TTY environments (CI/CD)
+                use_rich_progress = progress and HAS_RICH and self.console and self.is_tty
+                use_tqdm_progress = progress and HAS_TQDM and tqdm and self.is_tty and not use_rich_progress
+
                 completed_count = 0
-                if progress and HAS_RICH and self.console:
+                if use_rich_progress:
                     with Progress(
                         SpinnerColumn(),
                         TextColumn("[progress.description]{task.description}"),
@@ -654,7 +749,7 @@ class FileCombiner:
                         console=self.console,
                     ) as progress_bar:
                         task = progress_bar.add_task(
-                            "Processing files", total=len(all_files)
+                            "Collecting metadata", total=len(all_files)
                         )
 
                         for future in as_completed(future_to_file):
@@ -662,23 +757,23 @@ class FileCombiner:
                             try:
                                 result = future.result()
                                 if result:
-                                    processed_files.append(result)
+                                    file_entries.append(result)
                             except Exception as e:
                                 file_path = future_to_file[future]
                                 self.logger.error(f"Error processing {file_path}: {e}")
                                 self.stats["errors"] += 1
 
                             progress_bar.update(task, advance=1)
-                elif progress and HAS_TQDM and tqdm:
+                elif use_tqdm_progress:
                     pbar = tqdm(
-                        total=len(all_files), desc="Processing files", unit="files"
+                        total=len(all_files), desc="Collecting metadata", unit="files"
                     )
                     for future in as_completed(future_to_file):
                         completed_count += 1
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
@@ -686,13 +781,13 @@ class FileCombiner:
                         pbar.update(1)
                     pbar.close()
                 elif progress:
-                    print(f"Processing {len(all_files)} files...")
+                    print(f"Collecting metadata for {len(all_files)} files...")
                     for future in as_completed(future_to_file):
                         completed_count += 1
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
@@ -700,10 +795,10 @@ class FileCombiner:
 
                         if completed_count % 50 == 0:
                             print(
-                                f"Processed {completed_count}/{len(all_files)} files...",
+                                f"Collected {completed_count}/{len(all_files)} files...",
                                 end="\r",
                             )
-                    print(f"\nProcessed {completed_count}/{len(all_files)} files")
+                    print(f"\nCollected metadata for {completed_count}/{len(all_files)} files")
                 else:
                     # No progress display
                     for future in as_completed(future_to_file):
@@ -711,22 +806,23 @@ class FileCombiner:
                         try:
                             result = future.result()
                             if result:
-                                processed_files.append(result)
+                                file_entries.append(result)
                         except Exception as e:
                             file_path = future_to_file[future]
                             self.logger.error(f"Error processing {file_path}: {e}")
                             self.stats["errors"] += 1
 
-            if not processed_files:
+            if not file_entries:
                 self.logger.error("No files were successfully processed")
                 return False
 
             # Sort files by path for consistent output
-            processed_files.sort(key=lambda x: x[0].path)
+            file_entries.sort(key=lambda x: x[0].path)
 
-            # Write archive
-            success = await self._write_archive(
-                output_path, source_path, processed_files, compress, detected_format
+            # Phase 2: Write archive with streaming (O(1) memory for content)
+            # Content is read on-demand for each file, not held in memory
+            success = await self._write_archive_streaming(
+                output_path, source_path, file_entries, compress, detected_format
             )
 
             if success:
@@ -851,6 +947,68 @@ class FileCombiner:
             self.stats["errors"] += 1
             return None
 
+    def _collect_file_metadata(
+        self, file_path: Path, base_path: Path
+    ) -> Optional[Tuple[FileMetadata, Path]]:
+        """
+        Collect file metadata without reading content (memory-efficient).
+
+        Returns (metadata, file_path) tuple for streaming write phase.
+        Content is read on-demand during write to maintain O(1) memory usage.
+        """
+        try:
+            # Calculate relative path
+            try:
+                relative_path = str(file_path.relative_to(base_path))
+            except ValueError:
+                self.logger.warning(f"Cannot determine relative path for {file_path}")
+                return None
+
+            # Normalize path separators
+            relative_path = relative_path.replace("\\", "/")
+
+            # Apply include/exclude filters
+            should_exclude, reason = self._should_exclude(file_path, relative_path)
+            if should_exclude:
+                if self.verbose:
+                    self.logger.debug(f"Excluding {relative_path}: {reason}")
+                self.stats["files_skipped"] += 1
+                return None
+
+            # Get file stats
+            file_stat = file_path.stat()
+            is_binary = self._is_binary(file_path)
+
+            # Create metadata
+            metadata = FileMetadata(
+                path=relative_path,
+                size=file_stat.st_size,
+                mtime=file_stat.st_mtime,
+                mode=file_stat.st_mode,
+                is_binary=is_binary,
+                encoding="base64" if is_binary else "utf-8",
+                mime_type=mimetypes.guess_type(str(file_path))[0],
+            )
+
+            # Add checksum if requested
+            if self.calculate_checksums:
+                metadata.checksum = self._calculate_checksum(file_path)
+
+            self.stats["files_processed"] += 1
+            self.stats["bytes_processed"] += metadata.size
+
+            if self.verbose:
+                self.logger.debug(
+                    f"Collected metadata for {relative_path} ({self._format_size(metadata.size)})"
+                )
+
+            return (metadata, file_path)
+
+        except Exception as e:
+            self.logger.error(f"Error collecting metadata for {file_path}: {e}")
+            self.stats["errors"] += 1
+            return None
+
     def _read_file_content(
         self, file_path: Path, metadata: FileMetadata
     ) -> Optional[bytes]:
@@ -962,6 +1120,311 @@ class FileCombiner:
                 except OSError:
                     pass
             return False
+
+    async def _write_archive_streaming(
+        self,
+        output_path: Path,
+        source_path: Path,
+        file_entries: List[Tuple[FileMetadata, Path]],
+        compress: bool,
+        format_type: str = "txt",
+    ) -> bool:
+        """
+        Write archive with streaming - O(1) memory for content.
+
+        Reads file content on-demand during write, avoiding accumulation
+        of all file contents in memory. This allows processing repositories
+        of any size with bounded memory usage.
+        """
+        temp_file = None
+        try:
+            # Create temporary file in same directory as output
+            temp_file = tempfile.NamedTemporaryFile(
+                mode="wb" if compress else "w",
+                suffix=".tmp",
+                dir=output_path.parent,
+                delete=False,
+                encoding="utf-8" if not compress else None,
+            )
+            self._temp_files.append(temp_file.name)
+
+            # Write to temporary file first (atomic operation)
+            if compress:
+                with gzip.open(
+                    temp_file.name,
+                    "wt",
+                    encoding="utf-8",
+                    compresslevel=self.compression_level,
+                ) as f:
+                    await self._write_format_streaming(
+                        f, source_path, file_entries, format_type
+                    )
+            else:
+                with open(temp_file.name, "w", encoding="utf-8") as f:
+                    await self._write_format_streaming(
+                        f, source_path, file_entries, format_type
+                    )
+
+            # Atomic move to final location
+            shutil.move(temp_file.name, output_path)
+            self._temp_files.remove(temp_file.name)
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Error writing archive: {e}")
+            if temp_file and temp_file.name in self._temp_files:
+                try:
+                    os.unlink(temp_file.name)
+                    self._temp_files.remove(temp_file.name)
+                except OSError:
+                    pass
+            return False
+
+    async def _write_format_streaming(
+        self,
+        f,
+        source_path: Path,
+        file_entries: List[Tuple[FileMetadata, Path]],
+        format_type: str,
+    ):
+        """Dispatch to appropriate streaming format writer"""
+        if format_type == "xml":
+            await self._write_xml_streaming(f, source_path, file_entries)
+        elif format_type == "json":
+            await self._write_json_streaming(f, source_path, file_entries)
+        elif format_type == "markdown":
+            await self._write_markdown_streaming(f, source_path, file_entries)
+        elif format_type == "yaml":
+            await self._write_yaml_streaming(f, source_path, file_entries)
+        else:  # Default to txt format
+            await self._write_txt_streaming(f, source_path, file_entries)
+
+    def _read_content_for_entry(
+        self, metadata: FileMetadata, file_path: Path
+    ) -> Optional[bytes]:
+        """Read file content on-demand for streaming write"""
+        content = self._read_file_content(file_path, metadata)
+        return content
+
+    async def _write_txt_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write TXT archive with streaming - O(1) memory"""
+        # Write enhanced header
+        f.write("# Enhanced Combined Files Archive\n")
+        f.write(f"# Generated by file-combiner v{__version__}\n")
+        f.write(f"# Date: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}\n")
+        f.write(f"# Source: {source_path}\n")
+        f.write(f"# Total files: {len(file_entries)}\n")
+        f.write(f"# Total size: {self._format_size(self.stats['bytes_processed'])}\n")
+        f.write("#\n")
+        f.write("# Format:\n")
+        f.write(f"# {self.SEPARATOR}\n")
+        f.write(f"# {self.METADATA_PREFIX} <json_metadata>\n")
+        f.write(f"# {self.ENCODING_PREFIX} <encoding_type>\n")
+        f.write("# <file_content>\n")
+        f.write("#\n\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"{self.SEPARATOR}\n")
+            f.write(f"{self.METADATA_PREFIX} {json.dumps(asdict(metadata))}\n")
+            f.write(f"{self.ENCODING_PREFIX} {metadata.encoding}\n")
+
+            if metadata.is_binary:
+                f.write(content.decode("ascii"))
+            else:
+                f.write(content.decode("utf-8"))
+
+            f.write("\n")
+            # Content goes out of scope here - memory freed
+
+    async def _write_xml_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write XML archive with streaming - O(1) memory per file"""
+        # Write XML header manually for streaming
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write(f'<file_archive version="{__version__}" ')
+        f.write(f'created="{time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}" ')
+        f.write(f'source="{source_path}" ')
+        f.write(f'total_files="{len(file_entries)}" ')
+        f.write(f'total_size="{self.stats["bytes_processed"]}">\n')
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            # Build file element with attributes
+            attrs = " ".join(
+                f'{k}="{self._xml_escape_attr(str(v))}"'
+                for k, v in asdict(metadata).items()
+                if v is not None
+            )
+            f.write(f"  <file {attrs}>")
+
+            if metadata.is_binary:
+                f.write(content.decode("ascii"))
+            else:
+                f.write(self._xml_escape_content(content.decode("utf-8")))
+
+            f.write("</file>\n")
+            # Content goes out of scope here - memory freed
+
+        f.write("</file_archive>")
+
+    def _xml_escape_attr(self, s: str) -> str:
+        """Escape string for XML attribute value"""
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    def _xml_escape_content(self, s: str) -> str:
+        """Escape string for XML element content"""
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    async def _write_json_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write JSON archive with streaming - uses incremental JSON building"""
+        # Write header
+        f.write("{\n")
+        f.write('  "metadata": {\n')
+        f.write(f'    "version": "{__version__}",\n')
+        f.write(
+            f'    "created": "{time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())}",\n'
+        )
+        f.write(f'    "source": {json.dumps(str(source_path))},\n')
+        f.write(f'    "total_files": {len(file_entries)},\n')
+        f.write(f'    "total_size": {self.stats["bytes_processed"]}\n')
+        f.write("  },\n")
+        f.write('  "files": [\n')
+
+        # Stream files one at a time
+        first = True
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            if not first:
+                f.write(",\n")
+            first = False
+
+            file_data = asdict(metadata)
+            if metadata.is_binary:
+                file_data["content"] = content.decode("ascii")
+            else:
+                file_data["content"] = content.decode("utf-8")
+
+            # Write indented JSON for this file
+            file_json = json.dumps(file_data, indent=2, ensure_ascii=False)
+            # Indent each line
+            indented = "\n".join("    " + line for line in file_json.split("\n"))
+            f.write(indented)
+            # Content goes out of scope here - memory freed
+
+        f.write("\n  ]\n}")
+
+    async def _write_markdown_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write Markdown archive with streaming - O(1) memory per file"""
+        # Write header
+        f.write("# Combined Files Archive\n\n")
+        f.write(f"**Generated by:** file-combiner v{__version__}  \n")
+        f.write(
+            f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}  \n"
+        )
+        f.write(f"**Source:** `{source_path}`  \n")
+        f.write(f"**Total files:** {len(file_entries)}  \n")
+        f.write(
+            f"**Total size:** {self._format_size(self.stats['bytes_processed'])}  \n\n"
+        )
+
+        # Table of contents (uses only metadata, not content)
+        f.write("## Table of Contents\n\n")
+        for i, (metadata, _) in enumerate(file_entries, 1):
+            anchor = metadata.path.replace("/", "").replace(".", "")
+            f.write(f"{i}. [{metadata.path}](#{anchor})\n")
+        f.write("\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"## {metadata.path}\n\n")
+            f.write(f"**Size:** {self._format_size(metadata.size)}  \n")
+            f.write(
+                f"**Modified:** {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metadata.mtime))}  \n"
+            )
+            f.write(f"**Encoding:** {metadata.encoding}  \n")
+            f.write(f"**Binary:** {'Yes' if metadata.is_binary else 'No'}  \n\n")
+
+            if metadata.is_binary:
+                content_str = content.decode("ascii")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
+            else:
+                lang = self._detect_language(metadata.path)
+                content_str = content.decode("utf-8")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}{lang}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
+            # Content goes out of scope here - memory freed
+
+    async def _write_yaml_streaming(
+        self, f, source_path: Path, file_entries: List[Tuple[FileMetadata, Path]]
+    ):
+        """Write YAML archive with streaming - O(1) memory per file"""
+        # Write header
+        f.write("# Combined Files Archive\n")
+        f.write(f"version: {__version__}\n")
+        f.write(f"created: '{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}'\n")
+        f.write(f"source: '{source_path}'\n")
+        f.write(f"total_files: {len(file_entries)}\n")
+        f.write(f"total_size: {self.stats['bytes_processed']}\n\n")
+        f.write("files:\n")
+
+        # Stream files one at a time
+        for metadata, file_path in file_entries:
+            content = self._read_content_for_entry(metadata, file_path)
+            if content is None:
+                continue
+
+            f.write(f"  - path: '{metadata.path}'\n")
+            f.write(f"    size: {metadata.size}\n")
+            f.write(f"    mtime: {metadata.mtime}\n")
+            f.write(f"    encoding: '{metadata.encoding}'\n")
+            f.write(f"    is_binary: {str(metadata.is_binary).lower()}\n")
+
+            if metadata.is_binary:
+                content_str = content.decode("ascii")
+            else:
+                content_str = content.decode("utf-8")
+
+            content_lines = content_str.split("\n")
+            f.write("    content: |\n")
+            for line in content_lines:
+                f.write(f"      {line}\n")
+            f.write("\n")
+            # Content goes out of scope here - memory freed
 
     async def _write_archive_content(
         self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
@@ -1111,15 +1574,19 @@ class FileCombiner:
             f.write(f"**Binary:** {'Yes' if metadata.is_binary else 'No'}  \n\n")
 
             if metadata.is_binary:
-                f.write("```\n")
-                f.write(content.decode("ascii"))
-                f.write("\n```\n\n")
+                content_str = content.decode("ascii")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
             else:
                 # Detect language for syntax highlighting
                 lang = self._detect_language(metadata.path)
-                f.write(f"```{lang}\n")
-                f.write(content.decode("utf-8"))
-                f.write("\n```\n\n")
+                content_str = content.decode("utf-8")
+                fence = self._get_safe_fence(content_str)
+                f.write(f"{fence}{lang}\n")
+                f.write(content_str)
+                f.write(f"\n{fence}\n\n")
 
     async def _write_yaml_format(
         self, f, source_path: Path, processed_files: List[Tuple[FileMetadata, bytes]]
@@ -1152,6 +1619,65 @@ class FileCombiner:
             for line in content_lines:
                 f.write(f"      {line}\n")
             f.write("\n")
+
+    def _detect_input_format(self, input_path: Path) -> str:
+        """
+        Detect the format of an archive file for parsing.
+
+        Uses file extension and content inspection to determine format.
+        """
+        suffix = input_path.suffix.lower()
+
+        # Handle compressed files
+        if suffix == ".gz":
+            # Get the actual format from the inner extension
+            stem = input_path.stem
+            inner_suffix = Path(stem).suffix.lower()
+            suffix = inner_suffix if inner_suffix else suffix
+
+        format_map = {
+            ".json": "json",
+            ".xml": "xml",
+            ".yaml": "yaml",
+            ".yml": "yaml",
+            ".md": "markdown",
+            ".markdown": "markdown",
+            ".txt": "txt",
+        }
+
+        detected = format_map.get(suffix, "txt")
+
+        # For ambiguous cases, try to inspect content
+        if detected == "txt":
+            try:
+                # Read first few bytes to detect format
+                with open(input_path, "rb") as f:
+                    magic = f.read(2)
+                    # Check for gzip
+                    if magic == b"\x1f\x8b":
+                        import gzip
+
+                        with gzip.open(input_path, "rt", encoding="utf-8") as gf:
+                            first_chars = gf.read(100).strip()
+                    else:
+                        f.seek(0)
+                        first_chars = f.read(100).decode("utf-8", errors="ignore").strip()
+
+                # Detect by content
+                if first_chars.startswith("{"):
+                    detected = "json"
+                elif first_chars.startswith("<?xml") or first_chars.startswith("<file_archive"):
+                    detected = "xml"
+                elif first_chars.startswith("# Combined Files Archive") and "```" in first_chars:
+                    detected = "markdown"
+                elif first_chars.startswith("# Combined Files Archive") or (
+                    first_chars.startswith("version:") and "files:" in first_chars
+                ):
+                    detected = "yaml"
+            except Exception:
+                pass  # Fall back to txt format
+
+        return detected
 
     def _detect_language(self, file_path: str) -> str:
         """Detect programming language from file extension for syntax highlighting"""
@@ -1233,7 +1759,10 @@ class FileCombiner:
                     f"Cannot write to output directory: {output_path}"
                 )
 
+            # Detect archive format
+            detected_format = self._detect_input_format(input_path)
             self.logger.info(f"Splitting archive: {input_path}")
+            self.logger.info(f"Detected format: {detected_format}")
             self.logger.info(f"Output directory: {output_path}")
             if is_compressed:
                 self.logger.info("Detected compressed archive")
@@ -1243,9 +1772,17 @@ class FileCombiner:
                 mode = "rt" if is_compressed else "r"
 
                 with open_func(input_path, mode, encoding="utf-8") as f:
-                    files_restored = await self._parse_and_restore_files(
-                        f, output_path, progress
-                    )
+                    # Dispatch to format-specific parser
+                    if detected_format == "json":
+                        files_restored = await self._parse_json_archive(f, output_path, progress)
+                    elif detected_format == "xml":
+                        files_restored = await self._parse_xml_archive(f, output_path, progress)
+                    elif detected_format == "yaml":
+                        files_restored = await self._parse_yaml_archive(f, output_path, progress)
+                    elif detected_format == "markdown":
+                        files_restored = await self._parse_markdown_archive(f, output_path, progress)
+                    else:  # Default to txt format
+                        files_restored = await self._parse_and_restore_files(f, output_path, progress)
 
                 self.logger.info(
                     f"Successfully split {files_restored} files to: {output_path}"
@@ -1258,9 +1795,17 @@ class FileCombiner:
                     self.logger.info("Trying to read as uncompressed...")
                     # Retry as uncompressed
                     with open(input_path, "r", encoding="utf-8") as f:
-                        files_restored = await self._parse_and_restore_files(
-                            f, output_path, progress
-                        )
+                        # Dispatch to format-specific parser
+                        if detected_format == "json":
+                            files_restored = await self._parse_json_archive(f, output_path, progress)
+                        elif detected_format == "xml":
+                            files_restored = await self._parse_xml_archive(f, output_path, progress)
+                        elif detected_format == "yaml":
+                            files_restored = await self._parse_yaml_archive(f, output_path, progress)
+                        elif detected_format == "markdown":
+                            files_restored = await self._parse_markdown_archive(f, output_path, progress)
+                        else:
+                            files_restored = await self._parse_and_restore_files(f, output_path, progress)
                     self.logger.info(
                         f"Successfully split {files_restored} files (uncompressed)"
                     )
@@ -1423,12 +1968,428 @@ class FileCombiner:
 
         return files_restored
 
+    async def _parse_json_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse JSON format archive and restore files"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            data = json.loads(content)
+
+            if "files" not in data:
+                self.logger.error("Invalid JSON archive: missing 'files' key")
+                return 0
+
+            files_list = data["files"]
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": file_data.get("ends_with_newline", True),
+                            "mode": file_data.get("mode", 0o644),
+                            "mtime": file_data.get("mtime", time.time()),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+                        content = file_data.get("content", "")
+
+                        # Convert content to lines for _restore_file
+                        content_lines = content.split("\n") if content else []
+
+                        await self._restore_file(output_path, metadata, encoding, content_lines)
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Invalid JSON archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_xml_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse XML format archive and restore files"""
+        import xml.etree.ElementTree as ET
+
+        files_restored = 0
+
+        try:
+            content = f.read()
+            root = ET.fromstring(content)
+
+            files_list = root.findall("file")
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_elem in files_list:
+                    try:
+                        metadata = {
+                            "path": file_elem.get("path", ""),
+                            "is_binary": file_elem.get("is_binary", "false").lower() == "true",
+                            "ends_with_newline": file_elem.get("ends_with_newline", "true").lower() == "true",
+                            "mode": int(file_elem.get("mode", "33188")),  # 0o644 in decimal
+                            "mtime": float(file_elem.get("mtime", str(time.time()))),
+                        }
+                        encoding = file_elem.get("encoding", "utf-8")
+                        content = file_elem.text or ""
+
+                        # Convert content to lines for _restore_file
+                        content_lines = content.split("\n") if content else []
+
+                        await self._restore_file(output_path, metadata, encoding, content_lines)
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_elem.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except ET.ParseError as e:
+            self.logger.error(f"Invalid XML archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_yaml_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse YAML format archive and restore files (simple parser, no PyYAML required)"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            lines = content.split("\n")
+
+            # Simple YAML parser for our specific format
+            files_list = []
+            current_file = None
+            in_content = False
+            content_lines = []
+
+            for line in lines:
+                if line.startswith("  - path:"):
+                    # Save previous file
+                    if current_file is not None:
+                        current_file["content_lines"] = content_lines
+                        files_list.append(current_file)
+                    # Start new file
+                    path_value = line.split(":", 1)[1].strip().strip("'\"")
+                    current_file = {"path": path_value}
+                    content_lines = []
+                    in_content = False
+                elif current_file is not None:
+                    if line.startswith("    content: |"):
+                        in_content = True
+                    elif in_content:
+                        if line.startswith("      "):
+                            content_lines.append(line[6:])  # Remove 6-space indent
+                        elif line.strip() == "" and content_lines:
+                            content_lines.append("")  # Preserve empty lines in content
+                        else:
+                            in_content = False
+                    elif line.startswith("    size:"):
+                        current_file["size"] = int(line.split(":", 1)[1].strip())
+                    elif line.startswith("    mtime:"):
+                        current_file["mtime"] = float(line.split(":", 1)[1].strip())
+                    elif line.startswith("    encoding:"):
+                        current_file["encoding"] = line.split(":", 1)[1].strip().strip("'\"")
+                    elif line.startswith("    is_binary:"):
+                        current_file["is_binary"] = line.split(":", 1)[1].strip().lower() == "true"
+
+            # Don't forget the last file
+            if current_file is not None:
+                current_file["content_lines"] = content_lines
+                files_list.append(current_file)
+
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": True,  # YAML format always has trailing newlines
+                            "mode": file_data.get("mode", 0o644),
+                            "mtime": file_data.get("mtime", time.time()),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+
+                        await self._restore_file(
+                            output_path, metadata, encoding, file_data.get("content_lines", [])
+                        )
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except Exception as e:
+            self.logger.error(f"Error parsing YAML archive: {e}")
+            return 0
+
+        return files_restored
+
+    async def _parse_markdown_archive(self, f, output_path: Path, progress: bool = True) -> int:
+        """Parse Markdown format archive and restore files"""
+        files_restored = 0
+
+        try:
+            content = f.read()
+            lines = content.split("\n")
+
+            # Parse markdown format
+            files_list = []
+            current_file = None
+            in_code_block = False
+            code_fence = None
+            content_lines = []
+            current_encoding = "utf-8"
+            current_is_binary = False
+
+            for line in lines:
+                # Detect file header (## path/to/file.ext)
+                if line.startswith("## ") and not in_code_block:
+                    # Save previous file
+                    if current_file is not None:
+                        current_file["content_lines"] = content_lines
+                        current_file["encoding"] = current_encoding
+                        current_file["is_binary"] = current_is_binary
+                        files_list.append(current_file)
+
+                    # Start new file
+                    file_path = line[3:].strip()
+                    # Skip table of contents section
+                    if file_path == "Table of Contents":
+                        current_file = None
+                        continue
+                    current_file = {"path": file_path}
+                    content_lines = []
+                    in_code_block = False
+                    code_fence = None
+                    current_encoding = "utf-8"
+                    current_is_binary = False
+                elif current_file is not None:
+                    # Parse metadata
+                    if line.startswith("**Encoding:**"):
+                        enc = line.split(":", 1)[1].strip().rstrip("  ")
+                        current_encoding = enc if enc else "utf-8"
+                    elif line.startswith("**Binary:**"):
+                        current_is_binary = "Yes" in line
+
+                    # Detect code fence start
+                    if not in_code_block and line.startswith("```"):
+                        in_code_block = True
+                        code_fence = line.rstrip()
+                        # Extract just the backticks part for matching
+                        fence_match = ""
+                        for c in code_fence:
+                            if c == "`":
+                                fence_match += c
+                            else:
+                                break
+                        code_fence = fence_match
+                        continue
+
+                    # Detect code fence end
+                    if in_code_block and line.rstrip() == code_fence:
+                        in_code_block = False
+                        code_fence = None
+                        continue
+
+                    # Collect content within code block
+                    if in_code_block:
+                        content_lines.append(line)
+
+            # Don't forget the last file
+            if current_file is not None:
+                current_file["content_lines"] = content_lines
+                current_file["encoding"] = current_encoding
+                current_file["is_binary"] = current_is_binary
+                files_list.append(current_file)
+
+            total_files = len(files_list)
+
+            # Setup progress
+            progress_bar = None
+            task = None
+            if progress and total_files > 0:
+                if HAS_RICH and self.console:
+                    progress_bar = Progress(
+                        SpinnerColumn(),
+                        TextColumn("[progress.description]{task.description}"),
+                        BarColumn(),
+                        MofNCompleteColumn(),
+                        TimeElapsedColumn(),
+                        console=self.console,
+                    )
+                    progress_bar.start()
+                    task = progress_bar.add_task("Extracting files", total=total_files)
+                elif HAS_TQDM and tqdm:
+                    pbar = tqdm(total=total_files, desc="Extracting files", unit="files")
+                else:
+                    print(f"Extracting {total_files} files...")
+
+            try:
+                for file_data in files_list:
+                    try:
+                        metadata = {
+                            "path": file_data.get("path", ""),
+                            "is_binary": file_data.get("is_binary", False),
+                            "ends_with_newline": True,
+                            "mode": 0o644,
+                            "mtime": time.time(),
+                        }
+                        encoding = file_data.get("encoding", "utf-8")
+
+                        await self._restore_file(
+                            output_path, metadata, encoding, file_data.get("content_lines", [])
+                        )
+                        files_restored += 1
+
+                        if progress and total_files > 0:
+                            if progress_bar and task is not None:
+                                progress_bar.update(task, advance=1)
+                            elif HAS_TQDM and tqdm and "pbar" in locals():
+                                pbar.update(1)
+                            elif files_restored % 10 == 0:
+                                print(f"Extracted {files_restored}/{total_files} files...", end="\r")
+
+                    except Exception as e:
+                        self.logger.error(f"Failed to restore file {file_data.get('path', 'unknown')}: {e}")
+
+            finally:
+                if progress:
+                    if progress_bar:
+                        progress_bar.stop()
+                    elif HAS_TQDM and tqdm and "pbar" in locals():
+                        pbar.close()
+                    elif total_files > 0:
+                        print(f"\nExtracted {files_restored} files")
+
+        except Exception as e:
+            self.logger.error(f"Error parsing Markdown archive: {e}")
+            return 0
+
+        return files_restored
+
     async def _restore_file(
         self, output_path: Path, metadata: dict, encoding: str, content_lines: List[str]
     ):
         """Restore individual file with proper content reconstruction"""
         try:
-            file_path = output_path / metadata["path"]
+            # SECURITY: Sanitize path to prevent path traversal attacks
+            file_path = self._sanitize_path(output_path, metadata["path"])
 
             # Ensure parent directories exist
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1485,6 +2446,84 @@ class FileCombiner:
                 f"Error restoring file {metadata.get('path', 'unknown')}: {e}"
             )
             raise
+
+    def _sanitize_path(self, base_dir: Path, unsafe_relative_path: str) -> Path:
+        """
+        Sanitize and validate extraction path to prevent path traversal attacks.
+
+        This prevents malicious archives from writing files outside the output directory
+        via paths like "../../../etc/passwd" or absolute paths.
+
+        Args:
+            base_dir: The base output directory (must be absolute)
+            unsafe_relative_path: The potentially malicious relative path from archive
+
+        Returns:
+            Safe absolute path within base_dir
+
+        Raises:
+            SecurityError: If the path would escape the base directory
+        """
+        # Resolve base_dir to absolute path
+        base_dir = base_dir.resolve()
+
+        # Normalize the unsafe path: remove leading slashes, handle backslashes
+        normalized_path = unsafe_relative_path.replace("\\", "/")
+        normalized_path = normalized_path.lstrip("/")
+
+        # Remove any null bytes (potential injection)
+        if "\x00" in normalized_path:
+            raise SecurityError(
+                f"Path contains null bytes (potential injection): {repr(unsafe_relative_path)}"
+            )
+
+        # Construct the target path and resolve it
+        target_path = (base_dir / normalized_path).resolve()
+
+        # Verify the resolved path is within base_dir
+        try:
+            target_path.relative_to(base_dir)
+        except ValueError:
+            raise SecurityError(
+                f"Path traversal attempt detected: '{unsafe_relative_path}' "
+                f"would escape output directory '{base_dir}'"
+            )
+
+        return target_path
+
+    def _get_safe_fence(self, content: str, base_fence: str = "```") -> str:
+        """
+        Calculate a safe code fence that won't be broken by content.
+
+        If content contains backtick sequences, returns a longer fence.
+        For example, if content has ``` inside, returns ```` instead.
+
+        Args:
+            content: The content to be wrapped in code fence
+            base_fence: The base fence string (default: ```)
+
+        Returns:
+            A fence string that is safe to use with this content
+        """
+        fence = base_fence
+        backtick_char = "`"
+
+        # Find the longest sequence of backticks in content
+        max_backticks = 0
+        current_count = 0
+
+        for char in content:
+            if char == backtick_char:
+                current_count += 1
+                max_backticks = max(max_backticks, current_count)
+            else:
+                current_count = 0
+
+        # If content has backtick sequences >= our fence, make fence longer
+        if max_backticks >= len(fence):
+            fence = backtick_char * (max_backticks + 1)
+
+        return fence
 
     def _cleanup_temp_files(self):
         """Clean up any temporary files and directories"""
@@ -1622,7 +2661,7 @@ Examples:
     )
 
     parser.add_argument(
-        "operation", choices=["combine", "split"], help="Operation to perform"
+        "operation", help="Operation to perform (combine or split)"
     )
     parser.add_argument("input_path", help="Input directory, file, or GitHub URL")
     parser.add_argument("output_path", help="Output file or directory")
@@ -1679,6 +2718,11 @@ Examples:
     parser.add_argument(
         "--no-progress", action="store_true", help="Disable progress bars"
     )
+    parser.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="Ignore .gitignore patterns (include all files that would normally be gitignored)",
+    )
 
     # Configuration
     parser.add_argument(
@@ -1696,6 +2740,25 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Fuzzy command matching for typos
+    valid_operations = ["combine", "split"]
+    if args.operation not in valid_operations:
+        close_matches = difflib.get_close_matches(
+            args.operation, valid_operations, n=1, cutoff=0.6
+        )
+        if close_matches:
+            print(
+                f"Unknown command '{args.operation}'. Did you mean '{close_matches[0]}'?",
+                file=sys.stderr,
+            )
+            print(f"Usage: file-combiner {close_matches[0]} <input> <output>", file=sys.stderr)
+        else:
+            print(
+                f"Unknown command '{args.operation}'. Valid commands: {', '.join(valid_operations)}",
+                file=sys.stderr,
+            )
+        return 1
 
     try:
         # Handle config creation
@@ -1733,6 +2796,7 @@ Examples:
                 "ignore_binary": args.ignore_binary,
                 "dry_run": args.dry_run,
                 "verbose": args.verbose,
+                "respect_gitignore": not args.no_gitignore,
             }
         )
 
