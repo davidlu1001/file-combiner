@@ -28,8 +28,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Tools",
+    "Topic :: Software Development :: Build Tools",
     "Topic :: System :: Archiving",
+    "Topic :: Utilities",
 ]
 
 [project.urls]
@@ -53,11 +54,10 @@ dev = [
 full = ["tqdm>=4.60.0"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
 only-include = ["file_combiner.py"]
 
 [tool.hatch.build.targets.sdist]
-include = [
+only-include = [
     "file_combiner.py",
     "README.md",
     "LICENSE",
