@@ -461,23 +461,38 @@ class FileCombiner:
 
         return False
 
-    def _normalize_include_patterns(self, source_path: Path) -> List[str]:
-        """Normalize include patterns to be relative to source directory.
+    def _normalize_patterns(self, patterns: List[str], source_path: Path, pattern_type: str = "include") -> List[str]:
+        """Normalize patterns to be relative to source directory.
 
         Converts filesystem paths like '../repo/src' to relative patterns like 'src/**'.
         Pure glob patterns like '*.py' are preserved as-is.
+
+        Args:
+            patterns: List of patterns (paths or globs) to normalize
+            source_path: The source directory being processed
+            pattern_type: "include" or "exclude" for logging
+
+        Returns:
+            List of normalized patterns relative to source_path
         """
-        if not self.include_patterns:
+        if not patterns:
             return []
 
         normalized = []
         source_resolved = source_path.resolve()
 
-        for pattern in self.include_patterns:
+        for pattern in patterns:
             # Try to resolve as a filesystem path
             try:
-                # Expand globs in the pattern to check if it refers to real paths
-                # First, check if it's a path (not a pure glob pattern)
+                # Check if pattern contains glob wildcards at the start
+                # If it starts with a glob, treat as pattern not path
+                if pattern.startswith("*") or pattern.startswith("?"):
+                    normalized.append(pattern)
+                    if self.verbose:
+                        self.logger.debug(f"Using {pattern_type} glob pattern: {pattern}")
+                    continue
+
+                # Try to treat as a path
                 pattern_path = Path(pattern)
 
                 # Resolve relative to CWD (where user ran the command)
@@ -492,43 +507,43 @@ class FileCombiner:
                     relative_str = str(relative).replace("\\", "/")
 
                     if pattern_resolved.is_dir():
-                        # Directory: include all files within it
+                        # Directory: match all files within it
                         if relative_str == ".":
-                            # Pattern points to source itself, include everything
+                            # Pattern points to source itself
                             normalized.append("**")
                         else:
-                            # Add pattern to match all files in this directory
                             normalized.append(f"{relative_str}/**")
                         if self.verbose:
-                            self.logger.debug(f"Normalized directory include: {pattern} -> {relative_str}/**")
+                            self.logger.debug(f"Normalized {pattern_type} directory: {pattern} -> {relative_str}/**")
                     elif pattern_resolved.is_file():
-                        # Single file: include exact path
+                        # Single file: exact path
                         normalized.append(relative_str)
                         if self.verbose:
-                            self.logger.debug(f"Normalized file include: {pattern} -> {relative_str}")
+                            self.logger.debug(f"Normalized {pattern_type} file: {pattern} -> {relative_str}")
                     elif "*" in pattern or "?" in pattern:
-                        # Pattern with wildcards that resolved but doesn't exist as file/dir
-                        # Try to make it relative
-                        normalized.append(relative_str)
-                    else:
-                        # Path doesn't exist - might be typo, but add it anyway
+                        # Pattern with wildcards - make relative
                         normalized.append(relative_str)
                         if self.verbose:
-                            self.logger.debug(f"Include path doesn't exist: {pattern} -> {relative_str}")
+                            self.logger.debug(f"Normalized {pattern_type} glob: {pattern} -> {relative_str}")
+                    else:
+                        # Path doesn't exist - warn user but add it
+                        normalized.append(relative_str)
+                        self.logger.warning(f"{pattern_type.capitalize()} path does not exist: {pattern}")
                     continue
                 except ValueError:
                     # Path is outside source directory
-                    # Check if it contains glob characters - might be a pattern like "*.py"
-                    pass
+                    if not ("*" in pattern or "?" in pattern):
+                        self.logger.warning(
+                            f"{pattern_type.capitalize()} path '{pattern}' is outside source directory '{source_path}'"
+                        )
             except (OSError, ValueError):
                 # Path resolution failed - treat as pure pattern
                 pass
 
-            # If we reach here, treat as a glob pattern (not a filesystem path)
-            # Could be patterns like "*.py", "src/**/*.js", etc.
+            # Treat as a glob pattern (not a filesystem path)
             normalized.append(pattern)
             if self.verbose:
-                self.logger.debug(f"Using pattern as-is: {pattern}")
+                self.logger.debug(f"Using {pattern_type} pattern as-is: {pattern}")
 
         return normalized
 
@@ -788,13 +803,29 @@ class FileCombiner:
                 "errors": 0,
             }
 
-            # Normalize include patterns relative to source directory
+            # Normalize include/exclude patterns relative to source directory
             # This converts paths like '../repo/src' to 'src/**'
             if self.include_patterns:
-                original_patterns = self.include_patterns.copy()
-                self.include_patterns = self._normalize_include_patterns(source_path)
-                if self.include_patterns and self.verbose:
-                    self.logger.debug(f"Include patterns: {original_patterns} -> {self.include_patterns}")
+                original_include = self.include_patterns.copy()
+                self.include_patterns = self._normalize_patterns(
+                    self.include_patterns, source_path, "include"
+                )
+                if self.verbose:
+                    self.logger.debug(f"Include patterns: {original_include} -> {self.include_patterns}")
+
+            if self.exclude_patterns:
+                # Separate default excludes from user excludes for normalization
+                default_excludes = self._default_excludes()
+                user_excludes = [p for p in self.exclude_patterns if p not in default_excludes]
+                if user_excludes:
+                    original_exclude = user_excludes.copy()
+                    normalized_excludes = self._normalize_patterns(
+                        user_excludes, source_path, "exclude"
+                    )
+                    # Recombine: normalized user patterns + default patterns
+                    self.exclude_patterns = normalized_excludes + default_excludes
+                    if self.verbose:
+                        self.logger.debug(f"Exclude patterns: {original_exclude} -> {normalized_excludes}")
 
             # Load .gitignore if present and enabled
             if self.respect_gitignore:
@@ -2745,11 +2776,31 @@ Examples:
   # With compression and verbose output
   %(prog)s combine /path/to/repo combined.txt.gz -cv
 
-  # Advanced filtering (excludes Python cache folders)
-  %(prog)s combine . output.txt --exclude "*.log" --exclude "__pycache__/**" --max-size 10M
+  # INCLUDE/EXCLUDE PATTERNS - supports both paths and glob patterns:
 
-  # Dry run to preview
-  %(prog)s combine . output.txt --dry-run --verbose
+  # Include specific directories (full paths or relative to source)
+  %(prog)s combine /repo output.txt --include /repo/src --include /repo/docs
+
+  # Include using glob patterns
+  %(prog)s combine . output.txt --include "*.py" --include "*.js"
+
+  # Include all Python files anywhere in the project
+  %(prog)s combine . output.txt --include "**/*.py"
+
+  # Include specific directory and root markdown files
+  %(prog)s combine . output.txt --include ./src --include "*.md"
+
+  # Exclude directories by path
+  %(prog)s combine . output.txt --exclude ./node_modules --exclude ./dist
+
+  # Exclude using glob patterns
+  %(prog)s combine . output.txt --exclude "*.log" --exclude "__pycache__/**"
+
+  # Combine include and exclude (include src/ but exclude tests within it)
+  %(prog)s combine . output.txt --include ./src --exclude "**/test_*"
+
+  # Dry run to preview what will be included
+  %(prog)s combine . output.txt --dry-run --verbose --include ./src
         """,
     )
 
@@ -2773,10 +2824,16 @@ Examples:
 
     # Filtering options
     parser.add_argument(
-        "-e", "--exclude", action="append", default=[], help="Exclude pattern"
+        "-e", "--exclude", action="append", default=[],
+        help="Exclude pattern or path. Can be a directory path (./node_modules), "
+             "a file path (./secret.txt), or a glob pattern (*.log, **/*.tmp). "
+             "Paths are auto-converted to relative patterns. Can be used multiple times."
     )
     parser.add_argument(
-        "-i", "--include", action="append", default=[], help="Include pattern"
+        "-i", "--include", action="append", default=[],
+        help="Include only matching files. Can be a directory path (./src), "
+             "a file path (./README.md), or a glob pattern (*.py, **/*.js). "
+             "Paths are auto-converted to relative patterns. Can be used multiple times."
     )
     parser.add_argument("-s", "--max-size", default="50M", help="Maximum file size")
     parser.add_argument("-d", "--max-depth", type=int, default=50, help="Maximum depth")
