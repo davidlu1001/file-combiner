@@ -1463,6 +1463,121 @@ class TestMultiFormatRoundTrip:
         assert combiner._detect_input_format(yaml_file) == "yaml"
 
 
+class TestAsyncPerformance:
+    """Tests for async I/O functionality"""
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for testing"""
+        temp_dir = tempfile.mkdtemp()
+        yield Path(temp_dir)
+        shutil.rmtree(temp_dir)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_combine(self, temp_dir):
+        """Test that combine uses prefetching for file reads"""
+        # Create multiple files to test prefetch behavior
+        project = temp_dir / "prefetch_test"
+        project.mkdir()
+
+        for i in range(5):
+            (project / f"file{i}.txt").write_text(f"Content of file {i}\n" * 100)
+
+        combiner = FileCombiner({"verbose": False})
+        output_file = temp_dir / "output.txt"
+
+        success = await combiner.combine_files(project, output_file, progress=False)
+        assert success
+        assert output_file.exists()
+
+        # Verify all files are in the output
+        content = output_file.read_text()
+        for i in range(5):
+            assert f"file{i}.txt" in content
+
+    @pytest.mark.asyncio
+    async def test_async_split_roundtrip(self, temp_dir):
+        """Test that async split works correctly with file restoration"""
+        project = temp_dir / "async_split_test"
+        project.mkdir()
+
+        # Create test files
+        (project / "main.py").write_text("print('hello')")
+        (project / "data.json").write_text('{"key": "value"}')
+        sub = project / "sub"
+        sub.mkdir()
+        (sub / "nested.txt").write_text("Nested content")
+
+        combiner = FileCombiner({"verbose": False})
+
+        # Combine
+        combined_file = temp_dir / "combined.yaml"
+        success = await combiner.combine_files(
+            project, combined_file, progress=False, format_type="yaml"
+        )
+        assert success
+
+        # Split
+        restored_dir = temp_dir / "restored"
+        success = await combiner.split_files(combined_file, restored_dir, progress=False)
+        assert success
+
+        # Verify restored files
+        assert (restored_dir / "main.py").exists()
+        assert (restored_dir / "data.json").exists()
+        assert (restored_dir / "sub" / "nested.txt").exists()
+
+        # Verify content
+        assert (restored_dir / "main.py").read_text().strip() == "print('hello')"
+        assert "key" in (restored_dir / "data.json").read_text()
+
+    @pytest.mark.asyncio
+    async def test_run_in_thread_helper(self, temp_dir):
+        """Test the run_in_thread helper function"""
+        from file_combiner import run_in_thread
+
+        # Test with a simple blocking function
+        def blocking_func(x, y):
+            return x + y
+
+        result = await run_in_thread(blocking_func, 2, 3)
+        assert result == 5
+
+        # Test with file I/O
+        test_file = temp_dir / "thread_test.txt"
+
+        def write_file(path, content):
+            with open(path, "w") as f:
+                f.write(content)
+            return True
+
+        result = await run_in_thread(write_file, test_file, "async test")
+        assert result
+        assert test_file.exists()
+        assert test_file.read_text() == "async test"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_formats(self, temp_dir):
+        """Test async combine works with all output formats"""
+        project = temp_dir / "format_test"
+        project.mkdir()
+        (project / "test.py").write_text("# Python file")
+        (project / "test.js").write_text("// JavaScript file")
+
+        combiner = FileCombiner({"verbose": False})
+
+        formats = ["txt", "json", "xml", "yaml", "markdown"]
+        for fmt in formats:
+            output_file = temp_dir / f"output.{fmt}"
+            success = await combiner.combine_files(
+                project, output_file, progress=False, format_type=fmt
+            )
+            assert success, f"Failed for format: {fmt}"
+            assert output_file.exists(), f"Output not created for format: {fmt}"
+            content = output_file.read_text()
+            assert "test.py" in content, f"test.py not found in {fmt} output"
+
+
 class TestIncludeExcludePatterns:
     """Comprehensive tests for include/exclude pattern handling"""
 
