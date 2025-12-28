@@ -1463,5 +1463,439 @@ class TestMultiFormatRoundTrip:
         assert combiner._detect_input_format(yaml_file) == "yaml"
 
 
+class TestAsyncPerformance:
+    """Tests for async I/O functionality"""
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for testing"""
+        temp_dir = tempfile.mkdtemp()
+        yield Path(temp_dir)
+        shutil.rmtree(temp_dir)
+
+    @pytest.mark.asyncio
+    async def test_prefetch_combine(self, temp_dir):
+        """Test that combine uses prefetching for file reads"""
+        # Create multiple files to test prefetch behavior
+        project = temp_dir / "prefetch_test"
+        project.mkdir()
+
+        for i in range(5):
+            (project / f"file{i}.txt").write_text(f"Content of file {i}\n" * 100)
+
+        combiner = FileCombiner({"verbose": False})
+        output_file = temp_dir / "output.txt"
+
+        success = await combiner.combine_files(project, output_file, progress=False)
+        assert success
+        assert output_file.exists()
+
+        # Verify all files are in the output
+        content = output_file.read_text()
+        for i in range(5):
+            assert f"file{i}.txt" in content
+
+    @pytest.mark.asyncio
+    async def test_async_split_roundtrip(self, temp_dir):
+        """Test that async split works correctly with file restoration"""
+        project = temp_dir / "async_split_test"
+        project.mkdir()
+
+        # Create test files
+        (project / "main.py").write_text("print('hello')")
+        (project / "data.json").write_text('{"key": "value"}')
+        sub = project / "sub"
+        sub.mkdir()
+        (sub / "nested.txt").write_text("Nested content")
+
+        combiner = FileCombiner({"verbose": False})
+
+        # Combine
+        combined_file = temp_dir / "combined.yaml"
+        success = await combiner.combine_files(
+            project, combined_file, progress=False, format_type="yaml"
+        )
+        assert success
+
+        # Split
+        restored_dir = temp_dir / "restored"
+        success = await combiner.split_files(combined_file, restored_dir, progress=False)
+        assert success
+
+        # Verify restored files
+        assert (restored_dir / "main.py").exists()
+        assert (restored_dir / "data.json").exists()
+        assert (restored_dir / "sub" / "nested.txt").exists()
+
+        # Verify content
+        assert (restored_dir / "main.py").read_text().strip() == "print('hello')"
+        assert "key" in (restored_dir / "data.json").read_text()
+
+    @pytest.mark.asyncio
+    async def test_run_in_thread_helper(self, temp_dir):
+        """Test the run_in_thread helper function"""
+        from file_combiner import run_in_thread
+
+        # Test with a simple blocking function
+        def blocking_func(x, y):
+            return x + y
+
+        result = await run_in_thread(blocking_func, 2, 3)
+        assert result == 5
+
+        # Test with file I/O
+        test_file = temp_dir / "thread_test.txt"
+
+        def write_file(path, content):
+            with open(path, "w") as f:
+                f.write(content)
+            return True
+
+        result = await run_in_thread(write_file, test_file, "async test")
+        assert result
+        assert test_file.exists()
+        assert test_file.read_text() == "async test"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_formats(self, temp_dir):
+        """Test async combine works with all output formats"""
+        project = temp_dir / "format_test"
+        project.mkdir()
+        (project / "test.py").write_text("# Python file")
+        (project / "test.js").write_text("// JavaScript file")
+
+        combiner = FileCombiner({"verbose": False})
+
+        formats = ["txt", "json", "xml", "yaml", "markdown"]
+        for fmt in formats:
+            output_file = temp_dir / f"output.{fmt}"
+            success = await combiner.combine_files(
+                project, output_file, progress=False, format_type=fmt
+            )
+            assert success, f"Failed for format: {fmt}"
+            assert output_file.exists(), f"Output not created for format: {fmt}"
+            content = output_file.read_text()
+            assert "test.py" in content, f"test.py not found in {fmt} output"
+
+
+class TestIncludeExcludePatterns:
+    """Comprehensive tests for include/exclude pattern handling"""
+
+    @pytest.fixture
+    def temp_dir(self):
+        """Create a temporary directory for testing"""
+        temp_dir = tempfile.mkdtemp()
+        yield Path(temp_dir)
+        shutil.rmtree(temp_dir)
+
+    @pytest.fixture
+    def complex_project(self, temp_dir):
+        """Create a complex project structure for testing patterns"""
+        project = temp_dir / "complex_project"
+        project.mkdir()
+
+        # Create directory structure
+        (project / "src").mkdir()
+        (project / "src" / "core").mkdir()
+        (project / "tests").mkdir()
+        (project / "docs").mkdir()
+        (project / "node_modules").mkdir()
+        (project / "node_modules" / "pkg").mkdir()
+        (project / "logs").mkdir()
+
+        # Create files
+        (project / "README.md").write_text("# Project")
+        (project / "CHANGELOG.md").write_text("# Changes")
+        (project / "src" / "main.py").write_text("# Main")
+        (project / "src" / "utils.py").write_text("# Utils")
+        (project / "src" / "core" / "engine.py").write_text("# Engine")
+        (project / "tests" / "test_main.py").write_text("# Test Main")
+        (project / "docs" / "guide.md").write_text("# Guide")
+        (project / "node_modules" / "pkg" / "index.js").write_text("// Pkg")
+        (project / "logs" / "app.log").write_text("log entry")
+        (project / "data.json").write_text("{}")
+        (project / "config.yaml").write_text("key: value")
+
+        return project
+
+    @pytest.mark.asyncio
+    async def test_include_directory_path(self, complex_project, temp_dir):
+        """Test include with directory path (not glob pattern)"""
+        config = {"include_patterns": [str(complex_project / "src")], "verbose": False}
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should include all files in src/
+        assert "src/main.py" in content
+        assert "src/utils.py" in content
+        assert "src/core/engine.py" in content
+        # Should exclude everything else
+        assert "README.md" not in content
+        assert "tests/test_main.py" not in content
+        assert "docs/guide.md" not in content
+
+    @pytest.mark.asyncio
+    async def test_include_multiple_directories(self, complex_project, temp_dir):
+        """Test include with multiple directory paths"""
+        config = {
+            "include_patterns": [
+                str(complex_project / "src"),
+                str(complex_project / "docs"),
+            ],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should include src/ and docs/
+        assert "src/main.py" in content
+        assert "src/core/engine.py" in content
+        assert "docs/guide.md" in content
+        # Should exclude tests/ and root files
+        assert "tests/test_main.py" not in content
+        assert "README.md" not in content
+
+    @pytest.mark.asyncio
+    async def test_include_mixed_paths_and_patterns(self, complex_project, temp_dir):
+        """Test include with mix of directory paths and glob patterns"""
+        config = {
+            "include_patterns": [
+                str(complex_project / "src"),
+                "*.md",  # Glob pattern for root .md files
+            ],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should include src/ files
+        assert "src/main.py" in content
+        # Should include root .md files
+        assert "README.md" in content
+        assert "CHANGELOG.md" in content
+        # docs/guide.md should also match *.md
+        assert "docs/guide.md" in content
+        # Should exclude other files
+        assert "data.json" not in content
+
+    @pytest.mark.asyncio
+    async def test_include_nested_glob_pattern(self, complex_project, temp_dir):
+        """Test include with nested glob patterns like **/*.py"""
+        config = {"include_patterns": ["**/*.py"], "verbose": False}
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should include all Python files
+        assert "src/main.py" in content
+        assert "src/utils.py" in content
+        assert "src/core/engine.py" in content
+        assert "tests/test_main.py" in content
+        # Should exclude non-Python files
+        assert "README.md" not in content
+        assert "data.json" not in content
+
+    @pytest.mark.asyncio
+    async def test_exclude_directory_path(self, complex_project, temp_dir):
+        """Test exclude with directory path"""
+        config = {
+            "exclude_patterns": [
+                str(complex_project / "node_modules"),
+                str(complex_project / "logs"),
+            ],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should exclude node_modules/ and logs/
+        assert "node_modules" not in content
+        assert "logs/app.log" not in content
+        # Should include everything else
+        assert "src/main.py" in content
+        assert "README.md" in content
+
+    @pytest.mark.asyncio
+    async def test_exclude_mixed_paths_and_patterns(self, complex_project, temp_dir):
+        """Test exclude with mix of directory paths and glob patterns"""
+        config = {
+            "exclude_patterns": [
+                str(complex_project / "node_modules"),
+                "*.log",
+                "*.json",
+            ],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should exclude
+        assert "node_modules" not in content
+        assert "app.log" not in content
+        assert "data.json" not in content
+        # Should include
+        assert "src/main.py" in content
+        assert "README.md" in content
+        assert "config.yaml" in content
+
+    @pytest.mark.asyncio
+    async def test_include_and_exclude_together(self, complex_project, temp_dir):
+        """Test using both include and exclude patterns"""
+        config = {
+            "include_patterns": [str(complex_project / "src")],
+            "exclude_patterns": ["**/core/**"],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should include src/ but not src/core/
+        assert "src/main.py" in content
+        assert "src/utils.py" in content
+        assert "src/core/engine.py" not in content
+
+    @pytest.mark.asyncio
+    async def test_include_single_file(self, complex_project, temp_dir):
+        """Test include with single file path"""
+        config = {
+            "include_patterns": [str(complex_project / "README.md")],
+            "verbose": False,
+        }
+        combiner = FileCombiner(config)
+
+        output_file = temp_dir / "output.txt"
+        success = await combiner.combine_files(complex_project, output_file, progress=False)
+        assert success
+
+        content = output_file.read_text()
+        # Should only include the single file
+        assert "README.md" in content
+        assert "src/main.py" not in content
+
+    def test_pattern_matching_glob_star(self):
+        """Test _matches_pattern with single glob star"""
+        combiner = FileCombiner({})
+
+        # *.py should match Python files in any directory (basename match)
+        assert combiner._matches_pattern("main.py", ["*.py"])
+        assert combiner._matches_pattern("src/utils.py", ["*.py"])
+        assert not combiner._matches_pattern("main.js", ["*.py"])
+
+    def test_pattern_matching_double_star(self):
+        """Test _matches_pattern with double glob star"""
+        combiner = FileCombiner({})
+
+        # **/*.py should match Python files at any depth
+        assert combiner._matches_pattern("main.py", ["**/*.py"])
+        assert combiner._matches_pattern("src/main.py", ["**/*.py"])
+        assert combiner._matches_pattern("src/core/engine.py", ["**/*.py"])
+        assert not combiner._matches_pattern("main.js", ["**/*.py"])
+
+    def test_pattern_matching_directory_pattern(self):
+        """Test _matches_pattern with directory patterns"""
+        combiner = FileCombiner({})
+
+        # src/** should match all files in src/
+        assert combiner._matches_pattern("src/main.py", ["src/**"])
+        assert combiner._matches_pattern("src/core/engine.py", ["src/**"])
+        assert not combiner._matches_pattern("tests/main.py", ["src/**"])
+        assert not combiner._matches_pattern("main.py", ["src/**"])
+
+    def test_pattern_matching_prefix(self):
+        """Test _matches_pattern with path prefix matching"""
+        combiner = FileCombiner({})
+
+        # Pattern like 'src' should match paths starting with 'src/'
+        assert combiner._matches_pattern("src/main.py", ["src"])
+        assert combiner._matches_pattern("src/core/engine.py", ["src"])
+        assert not combiner._matches_pattern("tests/main.py", ["src"])
+
+    def test_normalize_patterns_directory(self, temp_dir):
+        """Test _normalize_patterns with directory paths"""
+        project = temp_dir / "project"
+        project.mkdir()
+        (project / "src").mkdir()
+
+        combiner = FileCombiner({})
+        combiner.verbose = True
+
+        patterns = [str(project / "src")]
+        normalized = combiner._normalize_patterns(patterns, project, "include")
+
+        assert len(normalized) == 1
+        assert normalized[0] == "src/**"
+
+    def test_normalize_patterns_file(self, temp_dir):
+        """Test _normalize_patterns with file paths"""
+        project = temp_dir / "project"
+        project.mkdir()
+        (project / "README.md").write_text("# Test")
+
+        combiner = FileCombiner({})
+
+        patterns = [str(project / "README.md")]
+        normalized = combiner._normalize_patterns(patterns, project, "include")
+
+        assert len(normalized) == 1
+        assert normalized[0] == "README.md"
+
+    def test_normalize_patterns_glob(self, temp_dir):
+        """Test _normalize_patterns with glob patterns"""
+        project = temp_dir / "project"
+        project.mkdir()
+
+        combiner = FileCombiner({})
+
+        patterns = ["*.py", "**/*.js", "src/**"]
+        normalized = combiner._normalize_patterns(patterns, project, "include")
+
+        # Glob patterns should be preserved as-is
+        assert "*.py" in normalized
+        assert "**/*.js" in normalized
+        assert "src/**" in normalized
+
+    def test_normalize_patterns_outside_source(self, temp_dir):
+        """Test _normalize_patterns with path outside source directory"""
+        project = temp_dir / "project"
+        project.mkdir()
+        other = temp_dir / "other"
+        other.mkdir()
+
+        combiner = FileCombiner({})
+
+        patterns = [str(other)]
+        normalized = combiner._normalize_patterns(patterns, project, "include")
+
+        # Path outside source should be kept as-is (will be treated as pattern)
+        assert str(other) in normalized
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

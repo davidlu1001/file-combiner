@@ -10,7 +10,7 @@ A high-performance file combiner that merges entire directories into single file
 
 - **Multi-Format Output**: TXT, XML, JSON, Markdown, YAML with auto-detection
 - **Multi-Format Split**: Restore from any format (symmetric combine/split)
-- **High Performance**: Parallel processing with async I/O
+- **High Performance**: True async I/O with prefetching, parallel metadata collection
 - **Memory Efficient**: Streaming architecture with O(1) memory for content
 - **Bidirectional**: Combine and Split operations with perfect fidelity
 - **Smart Compression**: Optional gzip compression
@@ -106,13 +106,42 @@ file-combiner combine . for-ai.txt --max-size 5M
 file-combiner combine . ai-training.md
 ```
 
-### Language-Specific Filtering
+### Include/Exclude Filtering
+
+The `--include` and `--exclude` options support both **directory paths** and **glob patterns**:
 
 ```bash
-# Only include Python and JavaScript files
-file-combiner combine src/ review.txt.gz \
-  --include "*.py" --include "*.js" --compress
+# Include specific directories (paths are auto-converted to patterns)
+file-combiner combine . output.txt --include ./src --include ./docs
+
+# Include using glob patterns
+file-combiner combine . output.txt --include "*.py" --include "*.js"
+
+# Include all Python files at any depth
+file-combiner combine . output.txt --include "**/*.py"
+
+# Mix paths and patterns
+file-combiner combine . output.txt --include ./src --include "*.md"
+
+# Exclude directories by path
+file-combiner combine . output.txt --exclude ./node_modules --exclude ./dist
+
+# Exclude using glob patterns
+file-combiner combine . output.txt --exclude "*.log" --exclude "__pycache__/**"
+
+# Combine include and exclude (include src/ but exclude tests within)
+file-combiner combine . output.txt --include ./src --exclude "**/test_*"
+
+# Dry run to preview what will be included
+file-combiner combine . output.txt --dry-run --verbose --include ./src
 ```
+
+**Path Types Supported:**
+- **Absolute paths**: `/home/user/project/src`
+- **Relative paths**: `./src`, `../other/docs`
+- **Glob patterns**: `*.py`, `**/*.js`, `src/**`
+
+Paths are automatically normalized relative to the source directory.
 
 ## Multi-Format Output
 
@@ -142,9 +171,11 @@ file-combiner combine . data.txt --format json
 
 ## New in v2.1.0
 
-### Streaming Architecture
+### Streaming Architecture & Async I/O
 - **O(1) Memory for Content**: Process repositories of any size with bounded memory
+- **True Async I/O**: Prefetching reads next file while writing current one
 - **Two-Phase Pipeline**: Parallel metadata collection, streaming content write
+- **Async File Restoration**: Non-blocking file writes during split operations
 - **No Memory Bomb**: 10GB repo uses ~20MB RAM instead of 10GB+
 
 ### Security Hardening
@@ -158,6 +189,8 @@ file-combiner combine . data.txt --format json
 
 ### Developer Experience
 - **Gitignore Awareness**: Automatically respects `.gitignore` patterns
+- **Smart Include/Exclude**: Accepts both paths (`./src`) and patterns (`*.py`)
+- **Path Normalization**: Auto-converts paths to relative patterns
 - **Fuzzy Command Matching**: Suggests corrections for typos (`combin` → `combine`)
 - **TTY Detection**: Disables progress bars in CI/CD environments
 - **Signal Handling**: Graceful cleanup on Ctrl+C
@@ -238,12 +271,19 @@ Options:
   -v, --verbose            Enable verbose output
   -n, --dry-run            Preview without making changes
   --format FORMAT          Output format (txt, xml, json, markdown, yaml)
-  --exclude PATTERN        Exclude files matching pattern
-  --include PATTERN        Include only files matching pattern
+  -e, --exclude PATTERN    Exclude files (path or pattern, repeatable)
+  -i, --include PATTERN    Include only matching files (path or pattern, repeatable)
   --max-size SIZE          Maximum file size (e.g., 10M, 1G)
   --no-gitignore           Ignore .gitignore patterns
   --no-progress            Disable progress bars
   --jobs N                 Number of parallel workers
+
+Include/Exclude Examples:
+  --include ./src                  # Directory path
+  --include "*.py"                 # Glob pattern
+  --include "**/*.js"              # Recursive glob
+  --exclude ./node_modules         # Directory path
+  --exclude "*.log"                # Glob pattern
 ```
 
 ## Known Limitations
