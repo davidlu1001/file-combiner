@@ -432,20 +432,105 @@ class FileCombiner:
         for pattern in patterns:
             try:
                 if "**" in pattern:
-                    # Handle recursive patterns
-                    regex_pattern = pattern.replace("**/*", ".*").replace("**", ".*")
-                    regex_pattern = fnmatch.translate(regex_pattern)
-                    if re.match(regex_pattern, path):
+                    # Handle recursive glob patterns (e.g., src/**, **/*.py)
+                    # Convert glob pattern to regex properly
+                    # First, escape regex special chars except * and ?
+                    regex_pattern = re.escape(pattern)
+                    # Use placeholders to avoid replacement conflicts
+                    regex_pattern = regex_pattern.replace(r"\*\*", "\x00DSTAR\x00").replace(r"\*", "\x00STAR\x00").replace(r"\?", "\x00QUEST\x00")
+                    # **/ means "zero or more directories" -> (.*/)?
+                    regex_pattern = regex_pattern.replace("\x00DSTAR\x00/", "(.*/)?")
+                    # ** at end or standalone matches any characters including /
+                    regex_pattern = regex_pattern.replace("\x00DSTAR\x00", ".*")
+                    # * matches any characters except /
+                    regex_pattern = regex_pattern.replace("\x00STAR\x00", "[^/]*")
+                    # ? matches single character except /
+                    regex_pattern = regex_pattern.replace("\x00QUEST\x00", "[^/]")
+                    if re.match(f"^{regex_pattern}$", path):
                         return True
                 elif fnmatch.fnmatch(path, pattern):
                     return True
                 elif fnmatch.fnmatch(os.path.basename(path), pattern):
+                    return True
+                # Also check if path starts with pattern (for directory patterns)
+                elif path.startswith(pattern.rstrip("/") + "/"):
                     return True
             except re.error:
                 self.logger.warning(f"Invalid pattern: {pattern}")
                 continue
 
         return False
+
+    def _normalize_include_patterns(self, source_path: Path) -> List[str]:
+        """Normalize include patterns to be relative to source directory.
+
+        Converts filesystem paths like '../repo/src' to relative patterns like 'src/**'.
+        Pure glob patterns like '*.py' are preserved as-is.
+        """
+        if not self.include_patterns:
+            return []
+
+        normalized = []
+        source_resolved = source_path.resolve()
+
+        for pattern in self.include_patterns:
+            # Try to resolve as a filesystem path
+            try:
+                # Expand globs in the pattern to check if it refers to real paths
+                # First, check if it's a path (not a pure glob pattern)
+                pattern_path = Path(pattern)
+
+                # Resolve relative to CWD (where user ran the command)
+                if not pattern_path.is_absolute():
+                    pattern_path = Path.cwd() / pattern
+
+                pattern_resolved = pattern_path.resolve()
+
+                # Check if this path is inside or equal to source directory
+                try:
+                    relative = pattern_resolved.relative_to(source_resolved)
+                    relative_str = str(relative).replace("\\", "/")
+
+                    if pattern_resolved.is_dir():
+                        # Directory: include all files within it
+                        if relative_str == ".":
+                            # Pattern points to source itself, include everything
+                            normalized.append("**")
+                        else:
+                            # Add pattern to match all files in this directory
+                            normalized.append(f"{relative_str}/**")
+                        if self.verbose:
+                            self.logger.debug(f"Normalized directory include: {pattern} -> {relative_str}/**")
+                    elif pattern_resolved.is_file():
+                        # Single file: include exact path
+                        normalized.append(relative_str)
+                        if self.verbose:
+                            self.logger.debug(f"Normalized file include: {pattern} -> {relative_str}")
+                    elif "*" in pattern or "?" in pattern:
+                        # Pattern with wildcards that resolved but doesn't exist as file/dir
+                        # Try to make it relative
+                        normalized.append(relative_str)
+                    else:
+                        # Path doesn't exist - might be typo, but add it anyway
+                        normalized.append(relative_str)
+                        if self.verbose:
+                            self.logger.debug(f"Include path doesn't exist: {pattern} -> {relative_str}")
+                    continue
+                except ValueError:
+                    # Path is outside source directory
+                    # Check if it contains glob characters - might be a pattern like "*.py"
+                    pass
+            except (OSError, ValueError):
+                # Path resolution failed - treat as pure pattern
+                pass
+
+            # If we reach here, treat as a glob pattern (not a filesystem path)
+            # Could be patterns like "*.py", "src/**/*.js", etc.
+            normalized.append(pattern)
+            if self.verbose:
+                self.logger.debug(f"Using pattern as-is: {pattern}")
+
+        return normalized
 
     def _should_exclude(self, file_path: Path, relative_path: str) -> Tuple[bool, str]:
         """Advanced pattern matching for file exclusion with comprehensive checks"""
@@ -702,6 +787,14 @@ class FileCombiner:
                 "bytes_processed": 0,
                 "errors": 0,
             }
+
+            # Normalize include patterns relative to source directory
+            # This converts paths like '../repo/src' to 'src/**'
+            if self.include_patterns:
+                original_patterns = self.include_patterns.copy()
+                self.include_patterns = self._normalize_include_patterns(source_path)
+                if self.include_patterns and self.verbose:
+                    self.logger.debug(f"Include patterns: {original_patterns} -> {self.include_patterns}")
 
             # Load .gitignore if present and enabled
             if self.respect_gitignore:
